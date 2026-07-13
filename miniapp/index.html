@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#000000" />
+    <title>1FEDERAL VPN</title>
+    <style>
+      html, body {
+        margin: 0;
+        background: #000;
+        color: #a1a1aa;
+      }
+      #boot-loader {
+        display: flex;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 15px;
+      }
+      #boot-loader.hidden {
+        display: none;
+      }
+    </style>
+    
+    <script>
+      (function () {
+        var isTelegram = /Telegram/i.test(navigator.userAgent) || location.hash.indexOf('tgWebAppData') !== -1;
+        if (!isTelegram) return;
+
+        var sources = [
+          '/telegram-web-app.js',
+          '/sdk/telegram-web-app.js',
+          'https://telegram.org/js/telegram-web-app.js',
+        ];
+        var i = 0;
+        var done = false;
+        function tryNext() {
+          if (done || i >= sources.length) return;
+          var src = sources[i++];
+          var s = document.createElement('script');
+          s.async = true;
+          s.src = src;
+          var timer = setTimeout(function () {
+            s.remove();
+            tryNext();
+          }, 1500);
+          s.onload = function () {
+            clearTimeout(timer);
+            done = true;
+          };
+          s.onerror = function () {
+            clearTimeout(timer);
+            tryNext();
+          };
+          document.head.appendChild(s);
+        }
+        tryNext();
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="boot-loader">Загрузка…</div>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>
