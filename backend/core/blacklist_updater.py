@@ -23,6 +23,14 @@ def update_blacklist():
         for telegram_id in telegram_ids:
             try:
                 cursor.execute('INSERT OR IGNORE INTO blacklist (telegram_id) VALUES (?)', (telegram_id,))
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET is_banned = 1, ban_reason = 'Чёрный список'
+                    WHERE telegram_id = ? AND (is_banned = 0 OR is_banned IS NULL)
+                    """,
+                    (telegram_id,),
+                )
             except Exception as e:
                 logger.warning(f'Failed to add {telegram_id} to blacklist: {e}')
         conn.commit()

@@ -5,7 +5,7 @@ import requests
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, date
 from backend.database import database
-from backend.api import remnawave, platega
+from backend.api import remnawave
 from backend.core import abuse_detected
 logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')

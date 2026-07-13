@@ -5,7 +5,7 @@ import {
   CheckCircle, Clock, Globe, Shield, Zap, Plus, Sparkles,
   LogOut, Download, Apple, Command, User, ChevronDown,
   ArrowRight, Frown, BookOpen, ChevronRight, Sliders, X,
-  Rocket, FileText, ExternalLink, MessageCircle
+  FileText, ExternalLink, MessageCircle
 } from 'lucide-react';
 
 declare const importMetaMini: any | undefined;
@@ -316,24 +316,8 @@ const mapApiTariffCategory = (planType: string): 'regular' | 'family' => {
 };
 
 const PAYMENT_METHODS_DEFAULT: PaymentMethod[] = [
-  {
-    id: 'sbp',
-    name: 'СБП',
-    icon: '⚡',
-    feePercent: 0,
-    variants: [
-      { id: 'platega_sbp', name: 'Platega', feePercent: 0 }
-    ]
-  },
-  {
-    id: 'card',
-    name: 'Банковская карта',
-    icon: '💳',
-    feePercent: 0,
-    variants: [
-      { id: 'platega_card', name: 'Platega', feePercent: 0 }
-    ]
-  },
+  { id: 'lava_sbp', name: 'СБП', icon: '⚡', feePercent: 0 },
+  { id: 'lava_card', name: 'Банковская карта', icon: '💳', feePercent: 0 },
 ];
 
 const PLATFORMS: { id: PlatformId; name: string; icon: React.ReactNode }[] = [
@@ -601,6 +585,8 @@ export default function App() {
   const [displayName, setDisplayName] = useState<string>('User');
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
+  const [fromTelegram, setFromTelegram] = useState(() => isLikelyTelegramWebApp());
+  const [fromTelegram, setFromTelegram] = useState(() => isLikelyTelegramWebApp());
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const telegramWidgetRef = useRef<HTMLDivElement>(null);
@@ -623,9 +609,6 @@ export default function App() {
   const [isBanned, setIsBanned] = useState(false);
   const [banReason, setBanReason] = useState<string>('');
 
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  const [onboardingStep, setOnboardingStep] = useState(0);
-
   const [referrals, setReferrals] = useState({ count: 0, balance: 0 });
   const [referralList, setReferralList] = useState<ReferralUser[]>([]);
   const [selectedReferral, setSelectedReferral] = useState<ReferralUser | null>(null);
@@ -636,7 +619,6 @@ export default function App() {
 
   const [checkoutAmount, setCheckoutAmount] = useState(0);
   const [selectedMethod, setSelectedMethod] = useState<string | null>(null);
-  const [selectedVariant, setSelectedVariant] = useState<string | null>(null);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>(PAYMENT_METHODS_DEFAULT);
   const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
 
@@ -781,13 +763,6 @@ export default function App() {
         }
       });
       setDeviceKeys(keysMap);
-
-      if (userData && !userData.trial_used) {
-        const onboardingShown = localStorage.getItem(`onboarding_${tgId}`);
-        if (!onboardingShown && devicesList.length === 0) {
-          setShowOnboarding(true);
-        }
-      }
     }
 
     try {
@@ -915,6 +890,7 @@ export default function App() {
       let referralId: number | null = null;
 
       const inTelegram = isLikelyTelegramWebApp();
+      setFromTelegram(inTelegram);
 
       if (inTelegram) {
         const tgUser = await waitForTelegramUser();
@@ -1471,16 +1447,70 @@ export default function App() {
     if (!selectedMethod) return checkoutAmount;
     const method = paymentMethods.find(m => m.id === selectedMethod);
     if (!method) return checkoutAmount;
+    const feeAmount = checkoutAmount * (method.feePercent / 100);
+    return checkoutAmount + feeAmount;
+  };
 
-    let fee = method.feePercent;
+  const referralLink = useMemo(() => {
+    if (!telegramId) return '';
+    if (fromTelegram) {
+      return `https://t.me/${BOT_USERNAME_MINI}?start=ref${telegramId}`;
+    }
+    const base = `${window.location.origin}${window.location.pathname}`.replace(/\/$/, '');
+    return `${base}?ref=${telegramId}`;
+  }, [telegramId, fromTelegram]);
 
-    if (method.variants && selectedVariant) {
-        const v = method.variants.find(v => v.id === selectedVariant);
-        if (v) fee = v.feePercent;
+  const withdrawPreviewRub = Number(withdrawAmount) || 0;
+  const withdrawPreviewUsdt = rubToUsdt(withdrawPreviewRub);
+
+  const submitReferralWithdraw = async () => {
+    if (!telegramId) return;
+    const amount = Math.round(Number(withdrawAmount) * 100) / 100;
+    if (!Number.isFinite(amount) || amount < MIN_REFERRAL_WITHDRAW_RUB) {
+      alert(`Минимальная сумма вывода — ${MIN_REFERRAL_WITHDRAW_RUB}₽`);
+      return;
+    }
+    if (amount > MAX_REFERRAL_WITHDRAW_RUB) {
+      alert(`Максимальная сумма вывода — ${MAX_REFERRAL_WITHDRAW_RUB}₽`);
+      return;
+    }
+    if (amount > referrals.balance) {
+      alert('Недостаточно средств на балансе');
+      return;
+    }
+    const wallet = withdrawWallet.trim();
+    if (!isTonWithdrawRecipient(wallet)) {
+      alert('Введите UQ/EQ адрес, домен .ton, .t.me или @username');
+      return;
     }
 
-    const feeAmount = checkoutAmount * (fee / 100);
-    return checkoutAmount + feeAmount;
+    setWithdrawing(true);
+    try {
+      const res = await miniApiFetch('/user/withdraw', {
+        method: 'POST',
+        body: JSON.stringify({
+          telegram_id: telegramId,
+          amount,
+          method: 'ton_usdt',
+          crypto_net: 'TON',
+          crypto_addr: wallet,
+        }),
+      });
+      if (res?.success) {
+        alert(res.message || 'Заявка на вывод принята');
+        setWithdrawModalOpen(false);
+        setWithdrawAmount('');
+        setWithdrawWallet('');
+        await refreshUserData();
+      } else {
+        alert(res?.error || 'Не удалось оформить вывод');
+      }
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || 'Ошибка при выводе средств');
+    } finally {
+      setWithdrawing(false);
+    }
   };
 
   const HomeView = () => {
@@ -2020,15 +2050,7 @@ export default function App() {
             </div>
             {selectedMethod && (
               <div className="flex justify-between items-center text-sm">
-                <span className="text-gray-400">Комиссия ({
-                  (() => {
-                    const method = paymentMethods.find(m => m.id === selectedMethod);
-                    if (method?.variants && selectedVariant) {
-                      return method.variants.find(v => v.id === selectedVariant)?.feePercent;
-                    }
-                    return method?.feePercent;
-                  })()
-                }%):</span>
+                <span className="text-gray-400">Комиссия ({paymentMethods.find(m => m.id === selectedMethod)?.feePercent ?? 0}%):</span>
                 <span className="text-gray-300">+{
                   (() => {
                     const total = getPaymentTotal();
@@ -2049,14 +2071,7 @@ export default function App() {
           {paymentMethods.map(method => (
             <div key={method.id}>
               <button
-                onClick={() => {
-                  setSelectedMethod(method.id);
-                  if (method.variants && method.variants.length > 0) {
-                    setSelectedVariant(method.variants[0].id);
-                  } else {
-                    setSelectedVariant(null);
-                  }
-                }}
+                onClick={() => setSelectedMethod(method.id)}
                 className={`w-full p-4 rounded-2xl flex items-center justify-between transition-colors border ${
                   selectedMethod === method.id
                   ? 'bg-blue-500/20 border-blue-500 text-white'
@@ -2068,29 +2083,12 @@ export default function App() {
                   <div className="text-left">
                     <div className="font-semibold">{method.name}</div>
                     <div className="text-xs text-gray-400 mt-0.5">
-                      {method.variants ? 'Выберите провайдера' : (method.feePercent === 0 ? 'Без комиссии' : `Комиссия ${method.feePercent}%`)}
+                      {method.feePercent === 0 ? 'Без комиссии' : `Комиссия ${method.feePercent}%`}
                     </div>
                   </div>
                 </div>
                 {selectedMethod === method.id && <CheckCircle size={20} className="text-blue-400" />}
               </button>
-
-              {selectedMethod === method.id && method.variants && (
-                <div className="mt-2">
-                  <select
-                    value={selectedVariant || ''}
-                    onChange={(e) => setSelectedVariant(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-sm text-white focus:border-blue-500 outline-none"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {method.variants.map(v => (
-                      <option key={v.id} value={v.id} className="bg-black">
-                        {v.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
             </div>
           ))}
         </div>
@@ -2104,14 +2102,7 @@ export default function App() {
             }
             try {
               const total = getPaymentTotal();
-              const method = paymentMethods.find(m => m.id === selectedMethod);
-              let methodKey = selectedMethod || 'platega_sbp';
-
-              if (method?.variants && selectedVariant) {
-                methodKey = selectedVariant;
-              } else if (method?.variants && method.variants.length > 0) {
-                methodKey = method.variants[0].id;
-              }
+              const methodKey = selectedMethod || 'lava_sbp';
 
               const res = await miniApiFetch('/payment/create', {
                 method: 'POST',
@@ -2431,59 +2422,6 @@ export default function App() {
   };
 
   const ReferralView = () => {
-    const withdrawPreviewRub = Number(withdrawAmount) || 0;
-    const withdrawPreviewUsdt = rubToUsdt(withdrawPreviewRub);
-
-    const submitWithdraw = async () => {
-      if (!telegramId) return;
-      const amount = Math.round(Number(withdrawAmount) * 100) / 100;
-      if (!Number.isFinite(amount) || amount < MIN_REFERRAL_WITHDRAW_RUB) {
-        alert(`Минимальная сумма вывода — ${MIN_REFERRAL_WITHDRAW_RUB}₽`);
-        return;
-      }
-      if (amount > MAX_REFERRAL_WITHDRAW_RUB) {
-        alert(`Максимальная сумма вывода — ${MAX_REFERRAL_WITHDRAW_RUB}₽`);
-        return;
-      }
-      if (amount > referrals.balance) {
-        alert('Недостаточно средств на балансе');
-        return;
-      }
-      const wallet = withdrawWallet.trim();
-      if (!isTonWithdrawRecipient(wallet)) {
-        alert('Введите UQ/EQ адрес, домен .ton, .t.me или @username');
-        return;
-      }
-
-      setWithdrawing(true);
-      try {
-        const res = await miniApiFetch('/user/withdraw', {
-          method: 'POST',
-          body: JSON.stringify({
-            telegram_id: telegramId,
-            amount,
-            method: 'ton_usdt',
-            crypto_net: 'TON',
-            crypto_addr: wallet,
-          }),
-        });
-        if (res?.success) {
-          alert(res.message || 'Заявка на вывод принята');
-          setWithdrawModalOpen(false);
-          setWithdrawAmount('');
-          setWithdrawWallet('');
-          await refreshUserData();
-        } else {
-          alert(res?.error || 'Не удалось оформить вывод');
-        }
-      } catch (e: any) {
-        console.error(e);
-        alert(e?.message || 'Ошибка при выводе средств');
-      } finally {
-        setWithdrawing(false);
-      }
-    };
-
     return (
     <div className="pb-24">
       <Header title="Реферальная программа" />
@@ -2508,84 +2446,35 @@ export default function App() {
         </div>
 
         <button
-          onClick={() => setWithdrawModalOpen(true)}
-          className="w-full py-3.5 rounded-2xl bg-blue-500 hover:bg-blue-600 text-white font-semibold transition-colors"
+          onClick={() => referrals.balance > 0 && setWithdrawModalOpen(true)}
+          disabled={referrals.balance <= 0}
+          className={`w-full py-3.5 rounded-2xl text-white font-semibold transition-colors ${
+            referrals.balance > 0
+              ? 'bg-blue-500 hover:bg-blue-600'
+              : 'bg-gray-600 cursor-not-allowed opacity-50'
+          }`}
         >
           Вывод средств
         </button>
-
-        <Modal
-          title="Вывод средств"
-          isOpen={withdrawModalOpen}
-          onClose={() => !withdrawing && setWithdrawModalOpen(false)}
-        >
-          <div className="space-y-4">
-            <p className="text-sm text-gray-400">
-              Вывод в USDT в сети <span className="text-white font-medium">TON</span>. Курс: 85₽ = 1$.
-              Лимит: до {MAX_REFERRAL_WITHDRAW_RUB}₽, не чаще 1 раза в 24 часа.
-            </p>
-            <div>
-              <label className="text-xs text-gray-500 block mb-2">Сумма (₽)</label>
-              <input
-                type="number"
-                min={MIN_REFERRAL_WITHDRAW_RUB}
-                max={MAX_REFERRAL_WITHDRAW_RUB}
-                value={withdrawAmount}
-                onChange={(e) => setWithdrawAmount(e.target.value)}
-                placeholder={`${MIN_REFERRAL_WITHDRAW_RUB}–${MAX_REFERRAL_WITHDRAW_RUB}`}
-                className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white focus:border-blue-500 focus:outline-none"
-              />
-              <div className="text-xs text-gray-500 mt-2">
-                Доступно: {formatMoney(referrals.balance)} · {MIN_REFERRAL_WITHDRAW_RUB}–{MAX_REFERRAL_WITHDRAW_RUB}₽ · 1 раз / 24 ч
-              </div>
-            </div>
-            {withdrawPreviewRub >= MIN_REFERRAL_WITHDRAW_RUB && (
-              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-sm text-emerald-300">
-                Вы получите ≈ {withdrawPreviewUsdt} USDT
-              </div>
-            )}
-            <div>
-              <label className="text-xs text-gray-500 block mb-2">USDT-кошелёк (сеть TON)</label>
-              <input
-                value={withdrawWallet}
-                onChange={(e) => setWithdrawWallet(e.target.value)}
-                placeholder="UQ..., wallet.ton, user.t.me, @username"
-                className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
-              />
-              <div className="text-xs text-gray-500 mt-2">
-                Адрес EQ/UQ, домен .ton, .t.me или @username Telegram
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3 pt-2">
-              <Button variant="secondary" disabled={withdrawing} onClick={() => setWithdrawModalOpen(false)}>
-                Отмена
-              </Button>
-              <Button disabled={withdrawing || !withdrawAmount || !withdrawWallet} onClick={submitWithdraw}>
-                {withdrawing ? 'Отправка...' : 'Вывести'}
-              </Button>
-            </div>
-          </div>
-        </Modal>
 
         <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
           <label className="text-xs text-gray-400 mb-2 block">Ваша реферальная ссылка</label>
           <div className="flex gap-2">
             <div className="bg-white/5 flex-1 p-3 rounded-xl text-gray-300 font-mono text-xs truncate border border-white/10">
-              {telegramId ? `https://t.me/${BOT_USERNAME_MINI}?start=ref${telegramId}` : 'Загрузка...'}
+              {referralLink || 'Загрузка...'}
             </div>
             <button
-              onClick={() => {
-                if (telegramId) {
-                  handleCopy(`https://t.me/${BOT_USERNAME_MINI}?start=ref${telegramId}`);
-                }
-              }}
-              className="bg-blue-500 hover:bg-blue-600 px-4 rounded-xl text-white transition-colors"
+              onClick={() => referralLink && handleCopy(referralLink)}
+              disabled={!referralLink}
+              className="bg-blue-500 hover:bg-blue-600 disabled:opacity-50 px-4 rounded-xl text-white transition-colors"
             >
               <Copy size={18} />
             </button>
           </div>
           <div className="text-xs text-gray-500 mt-3">
-            За каждого приглашённого друга вы получите 50₽ за его первую покупку
+            {fromTelegram
+              ? 'Ссылка ведёт в бота. Друг может также зайти через сайт по ?ref='
+              : 'Ссылка ведёт на сайт. Друг может также зайти через бота'}
           </div>
         </div>
 
@@ -2944,107 +2833,58 @@ export default function App() {
         </div>
       </Modal>
 
-      {}
-      {showOnboarding && (
-        <div className="fixed inset-0 z-[100] bg-slate-950 flex flex-col">
-          {}
-          <div className="flex justify-center gap-2 pt-6 pb-4">
-            {[0, 1, 2, 3].map(i => (
-              <div
-                key={i}
-                className={`w-2 h-2 rounded-full transition-all ${i === onboardingStep ? 'bg-blue-500 w-6' : 'bg-slate-700'}`}
-              />
-            ))}
+      <Modal
+        title="Вывод средств"
+        isOpen={withdrawModalOpen}
+        onClose={() => !withdrawing && setWithdrawModalOpen(false)}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">
+            Вывод в USDT в сети <span className="text-white font-medium">TON</span>.
+          </p>
+          <div>
+            <label className="text-xs text-gray-500 block mb-2">Сумма (₽)</label>
+            <input
+              type="number"
+              min={MIN_REFERRAL_WITHDRAW_RUB}
+              max={MAX_REFERRAL_WITHDRAW_RUB}
+              value={withdrawAmount}
+              onChange={(e) => setWithdrawAmount(e.target.value)}
+              placeholder={`${MIN_REFERRAL_WITHDRAW_RUB}–${MAX_REFERRAL_WITHDRAW_RUB}`}
+              className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white focus:border-blue-500 focus:outline-none"
+            />
+            <div className="text-xs text-gray-500 mt-2">
+              Доступно: {formatMoney(referrals.balance)} · До {MAX_REFERRAL_WITHDRAW_RUB}₽
+            </div>
           </div>
-
-          {}
-          <div className="flex-1 flex flex-col items-center justify-center px-8 text-center">
-            {onboardingStep === 0 && (
-              <>
-                <div className="w-24 h-24 bg-blue-600/20 rounded-full flex items-center justify-center mb-6">
-                  <Shield className="text-blue-500" size={48} />
-                </div>
-                <h2 className="text-2xl font-bold text-white mb-4">Добро пожаловать!</h2>
-                <p className="text-slate-400 leading-relaxed">
-                  BLIN VPN — это современный и безопасный VPN-сервис.
-                  Мы поможем вам защитить ваше интернет-соединение.
-                </p>
-              </>
-            )}
-
-            {onboardingStep === 1 && (
-              <>
-                <div className="w-24 h-24 bg-green-600/20 rounded-full flex items-center justify-center mb-6">
-                  <Gift className="text-green-500" size={48} />
-                </div>
-                <h2 className="text-2xl font-bold text-white mb-4">Пробная подписка</h2>
-                <p className="text-slate-400 leading-relaxed">
-                  Попробуйте VPN за 1 ₽ — 7 дней доступа, до 2 устройств.
-                </p>
-              </>
-            )}
-
-            {onboardingStep === 2 && (
-              <>
-                <div className="w-24 h-24 bg-purple-600/20 rounded-full flex items-center justify-center mb-6">
-                  <UserPlus className="text-purple-500" size={48} />
-                </div>
-                <h2 className="text-2xl font-bold text-white mb-4">Реферальная программа</h2>
-                <p className="text-slate-400 leading-relaxed">
-                  Приглашайте друзей и получайте бонусы!
-                  За каждого приглашённого друга вы получите 50₽ за его первую покупку.
-                </p>
-              </>
-            )}
-
-            {onboardingStep === 3 && (
-              <>
-                <div className="w-24 h-24 bg-yellow-600/20 rounded-full flex items-center justify-center mb-6">
-                  <Rocket className="text-yellow-500" size={48} />
-                </div>
-                <h2 className="text-2xl font-bold text-white mb-4">Начнём!</h2>
-                <p className="text-slate-400 leading-relaxed">
-                  Всё готово для начала работы.
-                  Нажмите "Подключить VPN" на главном экране, чтобы настроить защиту.
-                </p>
-              </>
-            )}
+          {withdrawPreviewRub >= MIN_REFERRAL_WITHDRAW_RUB && (
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-sm text-emerald-300">
+              Вы получите ≈ {withdrawPreviewUsdt} USDT
+            </div>
+          )}
+          <div>
+            <label className="text-xs text-gray-500 block mb-2">USDT-кошелёк (сеть TON)</label>
+            <input
+              value={withdrawWallet}
+              onChange={(e) => setWithdrawWallet(e.target.value)}
+              placeholder="UQ..., wallet.ton, user.t.me, @username"
+              className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
+            />
+            <div className="text-xs text-gray-500 mt-2">
+              Адрес EQ/UQ, домен .ton, .t.me или @username Telegram
+            </div>
           </div>
-
-          {}
-          <div className="px-6 pb-8 space-y-3">
-            {onboardingStep < 3 ? (
-              <>
-                <button
-                  onClick={() => setOnboardingStep(prev => prev + 1)}
-                  className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold transition-colors"
-                >
-                  Далее
-                </button>
-                <button
-                  onClick={() => {
-                    setShowOnboarding(false);
-                    localStorage.setItem(`onboarding_${telegramId}`, 'true');
-                  }}
-                  className="w-full py-3 text-slate-500 hover:text-slate-300 transition-colors"
-                >
-                  Пропустить
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={() => {
-                  setShowOnboarding(false);
-                  localStorage.setItem(`onboarding_${telegramId}`, 'true');
-                }}
-                className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold transition-colors"
-              >
-                Начать пользоваться
-              </button>
-            )}
+          <div className="grid grid-cols-2 gap-3 pt-2">
+            <Button variant="secondary" disabled={withdrawing} onClick={() => setWithdrawModalOpen(false)}>
+              Отмена
+            </Button>
+            <Button disabled={withdrawing || !withdrawAmount || !withdrawWallet} onClick={submitReferralWithdraw}>
+              {withdrawing ? 'Отправка...' : 'Вывести'}
+            </Button>
           </div>
         </div>
-      )}
+      </Modal>
+
     </div>
   );
 }
