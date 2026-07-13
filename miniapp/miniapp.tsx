@@ -586,7 +586,6 @@ export default function App() {
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [fromTelegram, setFromTelegram] = useState(() => isLikelyTelegramWebApp());
-  const [fromTelegram, setFromTelegram] = useState(() => isLikelyTelegramWebApp());
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const telegramWidgetRef = useRef<HTMLDivElement>(null);
