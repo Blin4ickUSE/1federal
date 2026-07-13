@@ -1753,10 +1753,6 @@ def request_withdrawal():
         return (jsonify({'error': 'Invalid amount'}), 400)
     if amount <= 0:
         return (jsonify({'error': 'Invalid amount'}), 400)
-    if method == 'ton_usdt' and amount < 10:
-        return (jsonify({'error': 'Минимальная сумма вывода — 10₽'}), 400)
-    if method in ('card', 'crypto') and amount < 200:
-        return (jsonify({'error': 'Минимальная сумма вывода - 200₽'}), 400)
     user = database.get_user_by_telegram_id(telegram_id)
     if not user:
         return (jsonify({'error': 'User not found'}), 404)
@@ -1766,49 +1762,48 @@ def request_withdrawal():
     partner_balance = float(user.get('partner_balance', 0) or 0)
     if amount > partner_balance:
         return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
-    if method == 'ton_usdt':
-        from backend.ton.transfer import is_valid_ton_address, normalize_ton_address, rub_to_usdt, rub_to_usdt_micro, send_usdt_on_ton
+    if method in ('ton_usdt', 'card', 'crypto'):
         amount = round(amount, 2)
+        if not database.validate_partner_withdraw_amount(amount):
+            return (jsonify({'error': f'Максимальная сумма вывода — {database.PARTNER_WITHDRAW_MAX_RUB}₽'}), 400)
+        cooldown = database.get_partner_withdrawal_cooldown(user['id'])
+        if cooldown:
+            hours_left = max(1, (cooldown['seconds_left'] + 3599) // 3600)
+            return (jsonify({'error': f'Вывод доступен не чаще 1 раза в 24 часа. Попробуйте через {hours_left} ч.'}), 429)
+    if method == 'ton_usdt':
+        from backend.ton.transfer import is_ton_recipient_format, resolve_ton_recipient, rub_to_usdt, rub_to_usdt_micro, send_usdt_on_ton
         if amount < 10:
             return (jsonify({'error': 'Минимальная сумма вывода — 10₽'}), 400)
-        if amount > 100000:
-            return (jsonify({'error': 'Слишком большая сумма вывода'}), 400)
         partner_balance = float(user.get('partner_balance', 0) or 0)
         if amount > partner_balance + 0.001:
             return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
-        if database.has_recent_ton_withdrawal(user['id'], seconds=30):
-            return (jsonify({'error': 'Подождите 30 секунд перед следующим выводом'}), 429)
         wallet_raw = (crypto_addr or '').strip()
         net = (crypto_net or '').strip().upper()
         if net != 'TON':
             return (jsonify({'error': 'Поддерживается только сеть TON'}), 400)
-        if not is_valid_ton_address(wallet_raw):
-            return (jsonify({'error': 'Некорректный адрес USDT-кошелька в сети TON'}), 400)
-        wallet_addr = normalize_ton_address(wallet_raw)
+        if not is_ton_recipient_format(wallet_raw):
+            return (jsonify({'error': 'Некорректный адрес или домен (UQ/EQ, .ton, .t.me, @username)'}), 400)
+        wallet_addr = resolve_ton_recipient(wallet_raw)
         if not wallet_addr:
-            return (jsonify({'error': 'Некорректный адрес USDT-кошелька в сети TON'}), 400)
-        usdt_amount = rub_to_usdt(amount)
-        usdt_micro = rub_to_usdt_micro(amount)
+            return (jsonify({'error': 'Не удалось определить TON-кошелёк. Проверьте адрес или домен'}), 400)
+        try:
+            usdt_amount = rub_to_usdt(amount)
+            usdt_micro = rub_to_usdt_micro(amount)
+        except ValueError:
+            return (jsonify({'error': 'Сумма вывода вне допустимого диапазона'}), 400)
         if usdt_micro < 1:
             return (jsonify({'error': 'Сумма слишком мала для конвертации в USDT'}), 400)
-        if not database.deduct_partner_balance(user['id'], amount):
+        description = f'Вывод {amount}₽ в USDT (TON). Получатель: {wallet_raw} → {wallet_addr}. Курс: 85₽ = 1$. Получит: {usdt_amount} USDT'
+        transaction_id, prep_err = database.prepare_ton_withdrawal(user['id'], amount, description)
+        if prep_err == 'rate_limit':
+            return (jsonify({'error': 'Вывод доступен не чаще 1 раза в 24 часа'}), 429)
+        if prep_err == 'invalid_amount':
+            return (jsonify({'error': f'Максимальная сумма вывода — {database.PARTNER_WITHDRAW_MAX_RUB}₽'}), 400)
+        if prep_err == 'insufficient':
             return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        transaction_id = None
-        try:
-            description = f'Вывод {amount}₽ в USDT (TON). Кошелёк: {wallet_addr}. Курс: 85₽ = 1$. Получит: {usdt_amount} USDT'
-            cursor.execute("\n                INSERT INTO transactions (user_id, type, amount, status, description, payment_method)\n                VALUES (?, 'withdrawal_request', ?, 'Pending', ?, ?)\n            ", (user['id'], -amount, description, 'TON USDT'))
-            transaction_id = cursor.lastrowid
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            logger.error(f'TON withdrawal DB error: {e}')
-            database.refund_partner_balance(user['id'], amount)
+        if prep_err or not transaction_id:
             return (jsonify({'error': 'Не удалось создать заявку на вывод'}), 500)
-        finally:
-            conn.close()
-        success, transfer_msg = send_usdt_on_ton(wallet_addr, usdt_micro)
+        success, transfer_msg = send_usdt_on_ton(wallet_raw, usdt_micro, expected_address=wallet_addr)
         username = user.get('username', 'N/A')
         safe_msg = str(transfer_msg).replace('<', '').replace('>', '')[:500]
         conn = database.get_db_connection()
@@ -1834,24 +1829,6 @@ def request_withdrawal():
             conn.close()
     conn = database.get_db_connection()
     cursor = conn.cursor()
-    if method == 'card':
-        cursor.execute("\n            SELECT created_at FROM transactions \n            WHERE user_id = ? AND type = 'withdrawal_request' AND payment_method = 'Карта' AND status = 'Pending'\n            ORDER BY created_at DESC LIMIT 1\n        ", (user['id'],))
-        last_card_withdrawal = cursor.fetchone()
-        if last_card_withdrawal:
-            from datetime import datetime
-            last_date_str = last_card_withdrawal['created_at']
-            try:
-                if isinstance(last_date_str, str):
-                    last_date = datetime.fromisoformat(last_date_str.replace('Z', '+00:00'))
-                else:
-                    last_date = last_date_str
-                days_since = (datetime.now() - last_date.replace(tzinfo=None)).days
-                if days_since < 30:
-                    days_left = 30 - days_since
-                    conn.close()
-                    return (jsonify({'error': f'Вывод на карту доступен не чаще 1 раза в 30 дней. Осталось дней: {days_left}'}), 400)
-            except Exception as e:
-                logger.error(f'Error parsing last withdrawal date: {e}')
     try:
         if method == 'balance':
             cursor.execute('\n                UPDATE users \n                SET balance = balance + ?, partner_balance = partner_balance - ?\n                WHERE id = ?\n            ', (amount, amount, user['id']))
@@ -1860,16 +1837,31 @@ def request_withdrawal():
             conn.close()
             return jsonify({'success': True, 'message': f'Переведено {amount}₽ на основной баланс'})
         elif method in ('card', 'crypto'):
-            cursor.execute('\n                UPDATE users SET partner_balance = partner_balance - ? WHERE id = ?\n            ', (amount, user['id']))
+            amount = round(amount, 2)
+            if method == 'card' and amount < 200:
+                conn.close()
+                return (jsonify({'error': 'Минимальная сумма вывода — 200₽'}), 400)
             if method == 'card':
                 description = f'Заявка на вывод {amount}₽ на карту. Банк: {bank}, Телефон: {phone}'
                 details = f'🏦 Банк: {bank}\n📱 Телефон: {phone}'
+                payment_method = 'Карта'
             else:
                 description = f'Заявка на вывод {amount}₽ в криптовалюте. Сеть: {crypto_net}, Адрес: {crypto_addr}'
                 details = f'🌐 Сеть: {crypto_net}\n📝 Адрес: {crypto_addr}'
-            cursor.execute("\n                INSERT INTO transactions (user_id, type, amount, status, description, payment_method)\n                VALUES (?, 'withdrawal_request', ?, 'Pending', ?, ?)\n            ", (user['id'], -amount, description, 'Карта' if method == 'card' else 'Crypto'))
-            transaction_id = cursor.lastrowid
-            conn.commit()
+                payment_method = 'Crypto'
+            transaction_id, prep_err = database.prepare_partner_withdrawal(user['id'], amount, description, payment_method)
+            if prep_err == 'rate_limit':
+                conn.close()
+                return (jsonify({'error': 'Вывод доступен не чаще 1 раза в 24 часа'}), 429)
+            if prep_err == 'invalid_amount':
+                conn.close()
+                return (jsonify({'error': f'Максимальная сумма вывода — {database.PARTNER_WITHDRAW_MAX_RUB}₽'}), 400)
+            if prep_err == 'insufficient':
+                conn.close()
+                return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
+            if prep_err or not transaction_id:
+                conn.close()
+                return (jsonify({'error': 'Не удалось создать заявку на вывод'}), 500)
             username = user.get('username', 'N/A')
             method_name = 'Банковская карта' if method == 'card' else 'Криптовалюта'
             core.send_withdrawal_request_to_admin(transaction_id=transaction_id, user_id=user['id'], telegram_id=telegram_id, username=username, amount=amount, method=method_name, details=details)

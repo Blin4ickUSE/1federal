@@ -21,6 +21,20 @@ const BOT_USERNAME_MINI: string = rawEnvMini.VITE_BOT_USERNAME || rawEnvMini.REA
 const APP_NAME = '1FEDERAL VPN';
 const REFERRAL_RUB_PER_USD = 85;
 const MIN_REFERRAL_WITHDRAW_RUB = 10;
+const MAX_REFERRAL_WITHDRAW_RUB = 5000;
+const TON_ADDRESS_RE = /^(EQ|UQ)[A-Za-z0-9_-]{46}$/;
+const TON_DNS_RE = /^@?[a-z0-9][a-z0-9._-]{4,124}$/i;
+
+const isTonWithdrawRecipient = (value: string): boolean => {
+  const wallet = value.trim();
+  if (!wallet || wallet.length > 126) return false;
+  if (TON_ADDRESS_RE.test(wallet)) return true;
+  const normalized = wallet.startsWith('@') ? `${wallet.slice(1).toLowerCase()}.t.me` : wallet.toLowerCase();
+  if (normalized.endsWith('.t.me') || normalized.endsWith('.ton')) {
+    return TON_DNS_RE.test(wallet.startsWith('@') ? wallet : normalized);
+  }
+  return false;
+};
 const MINIAPP_SESSION_KEY = 'miniapp_session_token';
 
 interface TelegramWidgetUser {
@@ -2427,13 +2441,17 @@ export default function App() {
         alert(`Минимальная сумма вывода — ${MIN_REFERRAL_WITHDRAW_RUB}₽`);
         return;
       }
+      if (amount > MAX_REFERRAL_WITHDRAW_RUB) {
+        alert(`Максимальная сумма вывода — ${MAX_REFERRAL_WITHDRAW_RUB}₽`);
+        return;
+      }
       if (amount > referrals.balance) {
         alert('Недостаточно средств на балансе');
         return;
       }
       const wallet = withdrawWallet.trim();
-      if (!wallet || wallet.length > 48) {
-        alert('Введите корректный адрес USDT-кошелька в сети TON');
+      if (!isTonWithdrawRecipient(wallet)) {
+        alert('Введите UQ/EQ адрес, домен .ton, .t.me или @username');
         return;
       }
 
@@ -2504,19 +2522,21 @@ export default function App() {
           <div className="space-y-4">
             <p className="text-sm text-gray-400">
               Вывод в USDT в сети <span className="text-white font-medium">TON</span>. Курс: 85₽ = 1$.
+              Лимит: до {MAX_REFERRAL_WITHDRAW_RUB}₽, не чаще 1 раза в 24 часа.
             </p>
             <div>
               <label className="text-xs text-gray-500 block mb-2">Сумма (₽)</label>
               <input
                 type="number"
                 min={MIN_REFERRAL_WITHDRAW_RUB}
+                max={MAX_REFERRAL_WITHDRAW_RUB}
                 value={withdrawAmount}
                 onChange={(e) => setWithdrawAmount(e.target.value)}
-                placeholder={`от ${MIN_REFERRAL_WITHDRAW_RUB}`}
+                placeholder={`${MIN_REFERRAL_WITHDRAW_RUB}–${MAX_REFERRAL_WITHDRAW_RUB}`}
                 className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white focus:border-blue-500 focus:outline-none"
               />
               <div className="text-xs text-gray-500 mt-2">
-                Доступно: {formatMoney(referrals.balance)} · мин. {MIN_REFERRAL_WITHDRAW_RUB}₽
+                Доступно: {formatMoney(referrals.balance)} · {MIN_REFERRAL_WITHDRAW_RUB}–{MAX_REFERRAL_WITHDRAW_RUB}₽ · 1 раз / 24 ч
               </div>
             </div>
             {withdrawPreviewRub >= MIN_REFERRAL_WITHDRAW_RUB && (
@@ -2528,10 +2548,13 @@ export default function App() {
               <label className="text-xs text-gray-500 block mb-2">USDT-кошелёк (сеть TON)</label>
               <input
                 value={withdrawWallet}
-                onChange={(e) => setWithdrawWallet(e.target.value.trim())}
-                placeholder="UQ... или EQ..."
+                onChange={(e) => setWithdrawWallet(e.target.value)}
+                placeholder="UQ..., wallet.ton, user.t.me, @username"
                 className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
               />
+              <div className="text-xs text-gray-500 mt-2">
+                Адрес EQ/UQ, домен .ton, .t.me или @username Telegram
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-3 pt-2">
               <Button variant="secondary" disabled={withdrawing} onClick={() => setWithdrawModalOpen(false)}>

@@ -532,14 +532,104 @@ def deduct_partner_balance(user_id: int, amount: float) -> bool:
     finally:
         conn.close()
 
-def has_recent_ton_withdrawal(user_id: int, seconds: int=30) -> bool:
+PARTNER_WITHDRAW_MAX_RUB = 5000
+PARTNER_WITHDRAW_COOLDOWN_SECONDS = 86400
+
+def validate_partner_withdraw_amount(amount: float) -> bool:
+    return amount > 0 and amount <= PARTNER_WITHDRAW_MAX_RUB
+
+def get_partner_withdrawal_cooldown(user_id: int, cooldown_seconds: int = PARTNER_WITHDRAW_COOLDOWN_SECONDS) -> Optional[dict]:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("\n            SELECT 1 FROM transactions\n            WHERE user_id = ?\n              AND type = 'withdrawal_request'\n              AND payment_method = 'TON USDT'\n              AND datetime(created_at) >= datetime('now', ?)\n            LIMIT 1\n            ", (user_id, f'-{int(seconds)} seconds'))
-        return cursor.fetchone() is not None
+        cursor.execute(
+            """
+            SELECT created_at FROM transactions
+            WHERE user_id = ?
+              AND type = 'withdrawal_request'
+              AND datetime(created_at) >= datetime('now', ?)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id, f'-{int(cooldown_seconds)} seconds'),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        from datetime import datetime, timedelta
+        last_raw = row['created_at']
+        if isinstance(last_raw, str):
+            last_at = datetime.fromisoformat(last_raw.replace('Z', '+00:00')).replace(tzinfo=None)
+        else:
+            last_at = last_raw.replace(tzinfo=None) if getattr(last_raw, 'tzinfo', None) else last_raw
+        next_allowed = last_at + timedelta(seconds=cooldown_seconds)
+        seconds_left = int((next_allowed - datetime.now()).total_seconds())
+        if seconds_left <= 0:
+            return None
+        return {'seconds_left': seconds_left}
     finally:
         conn.close()
+
+def has_recent_ton_withdrawal(user_id: int, seconds: int = PARTNER_WITHDRAW_COOLDOWN_SECONDS) -> bool:
+    return get_partner_withdrawal_cooldown(user_id, seconds) is not None
+
+def prepare_partner_withdrawal(
+    user_id: int,
+    amount: float,
+    description: str,
+    payment_method: str,
+    cooldown_seconds: int = PARTNER_WITHDRAW_COOLDOWN_SECONDS,
+) -> tuple[Optional[int], Optional[str]]:
+    if not validate_partner_withdraw_amount(amount):
+        return None, 'invalid_amount'
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        cursor.execute(
+            """
+            SELECT 1 FROM transactions
+            WHERE user_id = ?
+              AND type = 'withdrawal_request'
+              AND datetime(created_at) >= datetime('now', ?)
+            LIMIT 1
+            """,
+            (user_id, f'-{int(cooldown_seconds)} seconds'),
+        )
+        if cursor.fetchone():
+            conn.rollback()
+            return None, 'rate_limit'
+        cursor.execute(
+            """
+            UPDATE users
+            SET partner_balance = partner_balance - ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND COALESCE(partner_balance, 0) >= ?
+            """,
+            (amount, user_id, amount),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return None, 'insufficient'
+        cursor.execute(
+            """
+            INSERT INTO transactions (user_id, type, amount, status, description, payment_method)
+            VALUES (?, 'withdrawal_request', ?, 'Pending', ?, ?)
+            """,
+            (user_id, -amount, description, payment_method),
+        )
+        transaction_id = cursor.lastrowid
+        conn.commit()
+        return transaction_id, None
+    except Exception as e:
+        logger.error(f'Prepare partner withdrawal error: {e}')
+        conn.rollback()
+        return None, 'db_error'
+    finally:
+        conn.close()
+
+def prepare_ton_withdrawal(user_id: int, amount: float, description: str, cooldown_seconds: int = PARTNER_WITHDRAW_COOLDOWN_SECONDS) -> tuple[Optional[int], Optional[str]]:
+    return prepare_partner_withdrawal(user_id, amount, description, 'TON USDT', cooldown_seconds)
 
 def refund_partner_balance(user_id: int, amount: float) -> bool:
     if amount <= 0:
