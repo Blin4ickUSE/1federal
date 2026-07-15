@@ -23,18 +23,9 @@ const REFERRAL_RUB_PER_USD = 85;
 const MIN_REFERRAL_WITHDRAW_RUB = 10;
 const MAX_REFERRAL_WITHDRAW_RUB = 5000;
 const TON_ADDRESS_RE = /^(EQ|UQ)[A-Za-z0-9_-]{46}$/;
-const TON_DNS_RE = /^@?[a-z0-9][a-z0-9._-]{4,124}$/i;
 
-const isTonWithdrawRecipient = (value: string): boolean => {
-  const wallet = value.trim();
-  if (!wallet || wallet.length > 126) return false;
-  if (TON_ADDRESS_RE.test(wallet)) return true;
-  const normalized = wallet.startsWith('@') ? `${wallet.slice(1).toLowerCase()}.t.me` : wallet.toLowerCase();
-  if (normalized.endsWith('.t.me') || normalized.endsWith('.ton')) {
-    return TON_DNS_RE.test(wallet.startsWith('@') ? wallet : normalized);
-  }
-  return false;
-};
+// Только сырой TON-адрес. Домены .ton / .t.me и @username не принимаются.
+const isTonWithdrawRecipient = (value: string): boolean => TON_ADDRESS_RE.test(value.trim());
 const MINIAPP_SESSION_KEY = 'miniapp_session_token';
 
 interface TelegramWidgetUser {
@@ -1679,7 +1670,7 @@ export default function App() {
     }
     const wallet = withdrawWallet.trim();
     if (!isTonWithdrawRecipient(wallet)) {
-      alert('Введите UQ/EQ адрес, домен .ton, .t.me или @username');
+      alert('Введите TON-адрес кошелька (EQ... или UQ...)');
       return;
     }
 
@@ -3014,11 +3005,11 @@ export default function App() {
             <input
               value={withdrawWallet}
               onChange={(e) => setWithdrawWallet(e.target.value)}
-              placeholder="UQ..., wallet.ton, user.t.me, @username"
+              placeholder="UQ... или EQ..."
               className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
             />
             <div className="text-xs text-gray-500 mt-2">
-              Адрес EQ/UQ, домен .ton, .t.me или @username Telegram
+              Только адрес TON-кошелька (EQ.../UQ...). Домены .ton, .t.me и @username не принимаются.
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3 pt-2">
@@ -3034,4 +3025,4 @@ export default function App() {
 
     </div>
   );
-}
+  }
