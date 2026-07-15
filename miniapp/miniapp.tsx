@@ -174,7 +174,44 @@ interface Plan {
   isTrial?: boolean;
   tariffCategory?: 'regular' | 'family';
   devicesLimit?: number;
+  /** Старая цена без выгоды за срок (зачёркнутая) */
+  oldPrice?: number;
+  /** Выгода за длинный срок, % */
+  benefitPercent?: number;
 }
+
+const formatBenefitPercent = (value: number) =>
+  `${value.toLocaleString('ru-RU', { maximumFractionDigits: 1, minimumFractionDigits: value % 1 === 0 ? 0 : 1 })}%`;
+
+/** Выгода по таблицам обычного/семейного тарифа — для API-тарифов без oldPrice */
+const PLAN_TERM_BENEFITS: Record<'regular' | 'family', Record<number, { oldPrice: number; benefitPercent: number }>> = {
+  regular: {
+    30: { oldPrice: 499, benefitPercent: 0 },
+    90: { oldPrice: 1497, benefitPercent: 6.5 },
+    180: { oldPrice: 2994, benefitPercent: 9.8 },
+    365: { oldPrice: 5988, benefitPercent: 16.5 },
+  },
+  family: {
+    30: { oldPrice: 899, benefitPercent: 0 },
+    90: { oldPrice: 2697, benefitPercent: 7.3 },
+    180: { oldPrice: 5394, benefitPercent: 9.2 },
+    365: { oldPrice: 10788, benefitPercent: 16.6 },
+  },
+};
+
+const enrichPlanBenefit = (plan: Plan): Plan => {
+  if (plan.isTrial || plan.price <= 0) return plan;
+  if (plan.oldPrice != null && plan.benefitPercent != null) return plan;
+  const category = plan.tariffCategory === 'family' ? 'family' : 'regular';
+  const daysKey = [30, 90, 180, 365].find((d) => Math.abs(plan.days - d) <= 5) ?? plan.days;
+  const benefit = PLAN_TERM_BENEFITS[category][daysKey];
+  if (!benefit || benefit.benefitPercent <= 0) return plan;
+  return {
+    ...plan,
+    oldPrice: plan.oldPrice ?? benefit.oldPrice,
+    benefitPercent: plan.benefitPercent ?? benefit.benefitPercent,
+  };
+};
 
 interface PaymentMethodVariant {
   id: string;
@@ -337,13 +374,13 @@ const PRIVACY_POLICY_TEXT = `
 const VPN_PLANS_DEFAULT: Plan[] = [
   { id: 'trial_7d', duration: 'Пробная подписка', price: 1, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
   { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2 },
-  { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2 },
-  { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2 },
-  { id: 'reg_y1', duration: '12 месяцев', price: 4999, highlight: false, days: 365, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
+  { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.8 },
+  { id: 'reg_y1', duration: '12 месяцев', price: 4999, highlight: false, days: 365, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 5988, benefitPercent: 16.5 },
   { id: 'fam_m1', duration: '1 месяц', price: 899, highlight: false, days: 30, tariffCategory: 'family', devicesLimit: 5 },
-  { id: 'fam_m3', duration: '3 месяца', price: 2499, highlight: false, days: 90, tariffCategory: 'family', devicesLimit: 5 },
-  { id: 'fam_m6', duration: '6 месяцев', price: 4899, highlight: false, days: 180, tariffCategory: 'family', devicesLimit: 5 },
-  { id: 'fam_y1', duration: '12 месяцев', price: 8999, highlight: false, days: 365, tariffCategory: 'family', devicesLimit: 5 },
+  { id: 'fam_m3', duration: '3 месяца', price: 2499, highlight: false, days: 90, tariffCategory: 'family', devicesLimit: 5, oldPrice: 2697, benefitPercent: 7.3 },
+  { id: 'fam_m6', duration: '6 месяцев', price: 4899, highlight: false, days: 180, tariffCategory: 'family', devicesLimit: 5, oldPrice: 5394, benefitPercent: 9.2 },
+  { id: 'fam_y1', duration: '12 месяцев', price: 8999, highlight: false, days: 365, tariffCategory: 'family', devicesLimit: 5, oldPrice: 10788, benefitPercent: 16.6 },
 ];
 
 const mapApiTariffCategory = (planType: string): 'regular' | 'family' => {
@@ -542,7 +579,7 @@ const Card: React.FC<{ children: React.ReactNode, className?: string, onClick?: 
 );
 
 const Header: React.FC<{ title: string, onBack?: () => void }> = ({ title, onBack }) => (
-  <div className="flex items-center gap-4 py-6 px-4">
+  <div className="flex items-center gap-4 py-3.5 px-4">
     {onBack && (
       <button onClick={onBack} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-white hover:bg-white/10 transition-colors shrink-0">
         <ChevronLeft size={22} />
@@ -624,6 +661,7 @@ export default function App() {
   const [fromTelegram, setFromTelegram] = useState(() => isLikelyTelegramWebApp());
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isFirstPageEnter, setIsFirstPageEnter] = useState(true);
   const telegramWidgetRef = useRef<HTMLDivElement>(null);
 
   const [devices, setDevices] = useState<Device[]>([]);
@@ -823,7 +861,7 @@ export default function App() {
           .filter((p: any) => p && p.is_active && (p.plan_type === 'vpn_regular' || p.plan_type === 'vpn_family' || p.plan_type === 'vpn'))
           .map((p: any) => {
             const category = mapApiTariffCategory(String(p.plan_type || 'vpn_regular'));
-            return {
+            return enrichPlanBenefit({
               id: `tariff_${p.id}`,
               duration: String(p.name || `${p.duration_days} дней`),
               price: Number(p.price) || 0,
@@ -832,7 +870,7 @@ export default function App() {
               isTrial: false,
               tariffCategory: category,
               devicesLimit: category === 'family' ? 5 : 2,
-            };
+            });
           })
           .filter(p => Number.isFinite(p.price) && p.price >= 0 && Number.isFinite(p.days) && p.days > 0);
 
@@ -1041,6 +1079,12 @@ export default function App() {
       container.innerHTML = '';
     };
   }, [needsLogin, handleTelegramWidgetAuth]);
+
+  useEffect(() => {
+    if (!isFirstPageEnter) return;
+    const timer = window.setTimeout(() => setIsFirstPageEnter(false), 1100);
+    return () => window.clearTimeout(timer);
+  }, [isFirstPageEnter]);
 
   useEffect(() => {
     if (!telegramId) return;
@@ -1660,7 +1704,7 @@ export default function App() {
     return (
       <div className="pb-24">
         {}
-        <div className="flex items-center justify-between py-6 px-4">
+        <div className="flex items-center justify-between py-3.5 px-4">
           <div>
             <div className="text-2xl font-bold text-white mb-1">Привет, {displayName}</div>
             <div className="text-sm text-gray-500">Добро пожаловать в {APP_NAME}</div>
@@ -1833,19 +1877,30 @@ export default function App() {
 
             <div className="space-y-2">
               {paidPlansByCategory(wizardTariffTab).map((plan) => {
-                const showDisc = promoDiscountPercent > 0 && plan.price > 0;
+                const showPromoDisc = promoDiscountPercent > 0 && plan.price > 0;
                 const eff = priceAfterPromoDiscount(plan.price);
+                const termBenefit = (plan.benefitPercent ?? 0) > 0;
+                const strikePrice = showPromoDisc
+                  ? plan.price
+                  : (termBenefit ? (plan.oldPrice ?? null) : null);
                 return (
                   <button
                     key={plan.id}
                     onClick={() => { setWizardPlan(plan); setWizardStep(2); }}
-                    className="w-full px-4 py-3.5 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 transition-colors flex items-center justify-between"
+                    className="w-full px-4 py-3.5 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 transition-colors flex items-center justify-between gap-3"
                   >
-                    <span className="text-white font-medium">{plan.duration}</span>
-                    <div className="text-right">
-                      <span className="text-white font-semibold">{showDisc ? eff : plan.price} ₽</span>
-                      {showDisc && (
-                        <div className="text-xs text-gray-500 line-through">{plan.price} ₽</div>
+                    <div className="text-left min-w-0">
+                      <div className="text-white font-medium">{plan.duration}</div>
+                      {termBenefit && (
+                        <div className="text-xs text-emerald-400 mt-0.5">
+                          Выгода {formatBenefitPercent(plan.benefitPercent!)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-white font-semibold">{showPromoDisc ? eff : plan.price} ₽</div>
+                      {strikePrice != null && (
+                        <div className="text-xs text-gray-500 line-through mt-0.5">{strikePrice} ₽</div>
                       )}
                     </div>
                   </button>
@@ -1879,8 +1934,20 @@ export default function App() {
                           ? priceAfterPromoDiscount(wizardPlan.price)
                           : (wizardPlan?.price ?? 0))} ₽
                     </span>
-                    {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && promoDiscountPercent > 0 && wizardPlan.price > 0 && (
-                      <div className="text-sm text-gray-500 line-through">{wizardPlan.price} ₽</div>
+                    {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && (
+                      <>
+                        {promoDiscountPercent > 0 && wizardPlan.price > 0 && (
+                          <div className="text-sm text-gray-500 line-through">{wizardPlan.price} ₽</div>
+                        )}
+                        {!(promoDiscountPercent > 0) && (wizardPlan.benefitPercent ?? 0) > 0 && wizardPlan.oldPrice != null && (
+                          <div className="text-sm text-gray-500 line-through">{wizardPlan.oldPrice} ₽</div>
+                        )}
+                        {(wizardPlan.benefitPercent ?? 0) > 0 && (
+                          <div className="text-xs text-emerald-400 mt-0.5">
+                            Выгода {formatBenefitPercent(wizardPlan.benefitPercent!)}
+                          </div>
+                        )}
+                      </>
                     )}
                     </div>
                 </div>
@@ -1977,7 +2044,7 @@ export default function App() {
 
     return (
       <div className="pb-24">
-        <div className="py-6 px-4">
+        <div className="py-3.5 px-4">
           <h1 className="text-2xl font-bold text-white">Моя подписка</h1>
           <p className="text-sm text-gray-500 mt-1">
             {!subscription
@@ -2131,27 +2198,34 @@ export default function App() {
           <div className="space-y-2">
             {plansForExtend.map(plan => {
               const extEff = priceAfterPromoDiscount(plan.price);
-              const extDisc = promoDiscountPercent > 0 && plan.price > 0;
+              const extPromo = promoDiscountPercent > 0 && plan.price > 0;
+              const termBenefit = (plan.benefitPercent ?? 0) > 0;
+              const strikePrice = extPromo
+                ? plan.price
+                : (termBenefit ? (plan.oldPrice ?? null) : null);
               return (
               <button
                 key={plan.id}
                 onClick={() => setExtendPlan(plan)}
-                className={`w-full px-4 py-3.5 rounded-2xl text-left transition-colors border flex items-center justify-between ${
+                className={`w-full px-4 py-3.5 rounded-2xl text-left transition-colors border flex items-center justify-between gap-3 ${
                   extendPlan?.id === plan.id
                     ? 'bg-white/10 border-white/20'
                     : 'bg-white/5 border-white/10 hover:bg-white/10'
                 }`}
               >
-                <div>
+                <div className="min-w-0">
                   <div className="text-white font-medium">{plan.duration}</div>
                   <div className="text-xs text-gray-500 mt-0.5">
                     {plan.tariffCategory === 'family' ? 'Семейный' : 'Обычный'}
+                    {termBenefit ? ` · выгода ${formatBenefitPercent(plan.benefitPercent!)}` : ''}
                   </div>
-                  {extDisc && (
-                    <div className="text-xs text-gray-500 mt-0.5 line-through">{plan.price} ₽</div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-white font-semibold">{extPromo ? extEff : plan.price} ₽</div>
+                  {strikePrice != null && (
+                    <div className="text-xs text-gray-500 mt-0.5 line-through">{strikePrice} ₽</div>
                   )}
                 </div>
-                <div className="text-white font-semibold">{extDisc ? extEff : plan.price} ₽</div>
               </button>
             );})}
           </div>
@@ -2742,7 +2816,7 @@ export default function App() {
   return (
     <div className="max-w-md mx-auto bg-black miniapp-shell relative text-white font-sans selection:bg-blue-500/30">
       <div className="p-4 min-h-[100dvh] flex flex-col">
-        <div key={view} className="page-enter flex-1 flex flex-col">
+        <div key={view} className={`page-enter ${isFirstPageEnter ? 'page-enter--first' : ''} flex-1 flex flex-col`}>
           {view === 'home' && HomeView()}
           {view === 'wizard' && WizardView()}
           {view === 'checkout' && CheckoutView()}

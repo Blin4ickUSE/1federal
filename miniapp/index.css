@@ -48,17 +48,17 @@ body {
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
 }
 
 @keyframes slideDown {
-  from { opacity: 0; transform: translateY(-20px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translate3d(0, -8px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
 }
 
 @keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.95); }
+  from { opacity: 0; transform: scale(0.98); }
   to { opacity: 1; transform: scale(1); }
 }
 
@@ -73,58 +73,109 @@ body {
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.3s ease-out forwards;
+  animation: fadeIn 0.45s ease both;
 }
 
 .animate-slide-up {
-  animation: slideUp 0.3s ease-out forwards;
+  animation: slideUp 0.5s ease both;
 }
 
 .animate-slide-down {
-  animation: slideDown 0.3s ease-out forwards;
+  animation: slideDown 0.5s ease both;
 }
 
 .animate-scale-in {
-  animation: scaleIn 0.2s ease-out forwards;
+  animation: scaleIn 0.4s ease both;
 }
 
 .animate-pulse-soft {
   animation: pulse 2s ease-in-out infinite;
 }
 
-@keyframes pageEnter {
-  from { opacity: 0; transform: translateY(14px); }
-  to { opacity: 1; transform: translateY(0); }
+/* Мягкое появление экрана: без пружинящего easing и без большого сдвига */
+@keyframes pageEnterSoft {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
 }
 
 .page-enter {
-  animation: pageEnter 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: pageEnterSoft 0.55s ease both;
+}
+
+.page-enter--first {
+  animation-duration: 0.95s;
+}
+
+@keyframes revealSoft {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 5px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
 }
 
 .stagger-children > * {
   opacity: 0;
-  animation: slideUp 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: revealSoft 0.6s ease both;
 }
-.stagger-children > *:nth-child(1) { animation-delay: 0.04s; }
-.stagger-children > *:nth-child(2) { animation-delay: 0.09s; }
-.stagger-children > *:nth-child(3) { animation-delay: 0.14s; }
-.stagger-children > *:nth-child(4) { animation-delay: 0.19s; }
-.stagger-children > *:nth-child(5) { animation-delay: 0.24s; }
-.stagger-children > *:nth-child(6) { animation-delay: 0.29s; }
-.stagger-children > *:nth-child(7) { animation-delay: 0.34s; }
-.stagger-children > *:nth-child(8) { animation-delay: 0.39s; }
-.stagger-children > *:nth-child(n+9) { animation-delay: 0.44s; }
 
-.stagger-1 { animation-delay: 0.05s; }
-.stagger-2 { animation-delay: 0.1s; }
-.stagger-3 { animation-delay: 0.15s; }
-.stagger-4 { animation-delay: 0.2s; }
-.stagger-5 { animation-delay: 0.25s; }
+.page-enter--first .stagger-children > * {
+  animation-duration: 0.85s;
+}
+
+.stagger-children > *:nth-child(1) { animation-delay: 0.05s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.11s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.17s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.23s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.29s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.35s; }
+.stagger-children > *:nth-child(7) { animation-delay: 0.41s; }
+.stagger-children > *:nth-child(8) { animation-delay: 0.47s; }
+.stagger-children > *:nth-child(n+9) { animation-delay: 0.53s; }
+
+.page-enter--first .stagger-children > *:nth-child(1) { animation-delay: 0.08s; }
+.page-enter--first .stagger-children > *:nth-child(2) { animation-delay: 0.16s; }
+.page-enter--first .stagger-children > *:nth-child(3) { animation-delay: 0.24s; }
+.page-enter--first .stagger-children > *:nth-child(4) { animation-delay: 0.32s; }
+.page-enter--first .stagger-children > *:nth-child(5) { animation-delay: 0.4s; }
+.page-enter--first .stagger-children > *:nth-child(6) { animation-delay: 0.48s; }
+.page-enter--first .stagger-children > *:nth-child(7) { animation-delay: 0.56s; }
+.page-enter--first .stagger-children > *:nth-child(8) { animation-delay: 0.64s; }
+.page-enter--first .stagger-children > *:nth-child(n+9) { animation-delay: 0.72s; }
+
+.stagger-1 { animation-delay: 0.08s; }
+.stagger-2 { animation-delay: 0.16s; }
+.stagger-3 { animation-delay: 0.24s; }
+.stagger-4 { animation-delay: 0.32s; }
+.stagger-5 { animation-delay: 0.4s; }
 
 .miniapp-shell {
   padding-top: var(--tg-safe-top, env(safe-area-inset-top, 0px));
   padding-bottom: var(--tg-safe-bottom, env(safe-area-inset-bottom, 0px));
   min-height: 100dvh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter,
+  .page-enter--first,
+  .stagger-children > *,
+  .animate-fade-in,
+  .animate-slide-up,
+  .animate-slide-down,
+  .animate-scale-in {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
 }
 
 .skeleton {
