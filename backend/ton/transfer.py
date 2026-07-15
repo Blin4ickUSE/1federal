@@ -5,8 +5,6 @@ import re
 import threading
 from typing import Optional, Tuple
 
-import requests
-
 logger = logging.getLogger(__name__)
 
 USDT_JETTON_MASTER = 'EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs'
@@ -16,12 +14,8 @@ MAX_WITHDRAW_RUB = 5000
 MAX_USDT_MICRO = int(round(MAX_WITHDRAW_RUB / RUB_PER_USD * 10 ** USDT_DECIMALS))
 JETTON_TRANSFER_OP = 0x0F8A7EA5
 GAS_TON_NANOTONS = int(0.08 * 1_000_000_000)
-TON_DNS_API_URL = os.getenv('TON_DNS_API_URL', 'https://toncenter.com/api/v3/dns/records')
-TON_DNS_TIMEOUT = 12
 
 TON_MAINNET_ADDRESS_RE = re.compile(r'^(EQ|UQ)[A-Za-z0-9_-]{46}$')
-TON_DNS_LABEL_RE = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
-TELEGRAM_USERNAME_RE = re.compile(r'^[a-z][a-z0-9_]{3,30}[a-z0-9_]$')
 
 _send_lock = threading.Lock()
 
@@ -54,8 +48,9 @@ def _address_to_user_friendly(address: str) -> Optional[str]:
 
 
 def _is_mainnet_address(address: str) -> bool:
+    # ВАЖНО: никакого .lower() — base64url регистрозависим
     addr = (address or '').strip()
-    if len(addr) > 48 or any(c.isspace() for c in addr):
+    if len(addr) != 48 or any(c.isspace() for c in addr):
         return False
     if not TON_MAINNET_ADDRESS_RE.match(addr):
         return False
@@ -73,100 +68,19 @@ def is_valid_ton_address(address: str) -> bool:
     return _is_mainnet_address(address)
 
 
-def _normalize_recipient_input(raw: str) -> Optional[str]:
-    value = (raw or '').strip()
-    if not value or len(value) > 126:
-        return None
-    if '://' in value or '/' in value or ' ' in value:
-        return None
-    if value.startswith('@'):
-        username = value[1:].lower()
-        if not TELEGRAM_USERNAME_RE.match(username):
-            return None
-        return f'{username}.t.me'
-    return value.lower()
-
-
-def _validate_dns_domain(domain: str) -> bool:
-    if len(domain) > 126 or len(domain) < 6:
-        return False
-    if domain.endswith('.ton'):
-        labels = domain[:-4].split('.')
-        zone = '.ton'
-    elif domain.endswith('.t.me'):
-        labels = domain[:-5].split('.')
-        zone = '.t.me'
-    else:
-        return False
-    if not labels or any(not label for label in labels):
-        return False
-    if zone == '.t.me' and len(labels) != 1:
-        return False
-    if zone == '.t.me':
-        username = labels[0]
-        return bool(TELEGRAM_USERNAME_RE.match(username))
-    for label in labels:
-        if len(label) > 63 or not TON_DNS_LABEL_RE.match(label):
-            return False
-    return True
-
-
-def _resolve_dns_domain(domain: str) -> Optional[str]:
-    if not _validate_dns_domain(domain):
-        return None
-    try:
-        response = requests.get(
-            TON_DNS_API_URL,
-            params={'domain': domain},
-            timeout=TON_DNS_TIMEOUT,
-        )
-        if response.status_code != 200:
-            logger.warning('TON DNS API status %s for %s', response.status_code, domain)
-            return None
-        payload = response.json()
-        records = payload.get('records') or []
-        for record in records:
-            wallet = record.get('dns_wallet')
-            if wallet:
-                normalized = _address_to_user_friendly(wallet)
-                if normalized:
-                    return normalized
-        address_book = payload.get('address_book') or {}
-        for entry in address_book.values():
-            user_friendly = entry.get('user_friendly')
-            if user_friendly:
-                normalized = _address_to_user_friendly(user_friendly)
-                if normalized:
-                    return normalized
-    except Exception:
-        logger.exception('TON DNS resolve failed for %s', domain)
-    return None
-
+# --- Совместимость со старым API вызывающего кода ---
+# Домены .ton / .t.me и @username больше НЕ поддерживаются: только EQ.../UQ...
 
 def is_ton_recipient_format(raw: str) -> bool:
-    normalized_input = _normalize_recipient_input(raw)
-    if not normalized_input:
-        return False
-    if _is_mainnet_address(normalized_input):
-        return True
-    return _validate_dns_domain(normalized_input)
+    return _is_mainnet_address(raw)
 
 
 def resolve_ton_recipient(raw: str) -> Optional[str]:
-    normalized_input = _normalize_recipient_input(raw)
-    if not normalized_input:
-        return None
-    if _is_mainnet_address(normalized_input):
-        return normalize_ton_address(normalized_input)
-    if normalized_input.endswith('.ton') or normalized_input.endswith('.t.me'):
-        return _resolve_dns_domain(normalized_input)
-    return None
+    return normalize_ton_address(raw)
 
 
 def is_valid_ton_recipient(raw: str) -> bool:
-    if not is_ton_recipient_format(raw):
-        return False
-    return resolve_ton_recipient(raw) is not None
+    return _is_mainnet_address(raw)
 
 
 def get_mnemonic() -> Optional[list[str]]:
@@ -196,9 +110,9 @@ async def _send_usdt_async(
     if usdt_micro <= 0 or usdt_micro > MAX_USDT_MICRO:
         return False, 'Сумма USDT вне допустимого диапазона'
 
-    normalized = resolve_ton_recipient(recipient) or normalize_ton_address(recipient)
+    normalized = normalize_ton_address(recipient)
     if not normalized:
-        return False, 'Некорректный адрес или домен TON (.ton / .t.me)'
+        return False, 'Некорректный адрес TON. Укажите адрес кошелька EQ.../UQ...'
 
     expected = normalize_ton_address(expected_address) if expected_address else None
     if expected and expected != normalized:
