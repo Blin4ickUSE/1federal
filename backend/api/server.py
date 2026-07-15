@@ -1783,6 +1783,9 @@ def request_withdrawal():
     auth_err = assert_telegram_identity(telegram_id)
     if auth_err:
         return auth_err
+    # telegram_id подтверждён assert_telegram_identity выше, поэтому ему можно доверять.
+    # Никогда не выводить is_admin из тела запроса.
+    is_admin = int(telegram_id) in _parse_admin_ids()
     try:
         amount = float(amount)
     except (ValueError, TypeError):
@@ -1804,10 +1807,13 @@ def request_withdrawal():
         amount = round(amount, 2)
         if not database.validate_partner_withdraw_amount(amount):
             return (jsonify({'error': f'Максимальная сумма вывода — {database.PARTNER_WITHDRAW_MAX_RUB}₽'}), 400)
-        cooldown = database.get_partner_withdrawal_cooldown(user['id'])
-        if cooldown:
-            hours_left = max(1, (cooldown['seconds_left'] + 3599) // 3600)
-            return (jsonify({'error': f'Вывод доступен не чаще 1 раза в 24 часа. Попробуйте через {hours_left} ч.'}), 429)
+        if is_admin:
+            logger.info(f'Withdrawal cooldown bypassed by admin {telegram_id}: amount={amount}, method={method}')
+        else:
+            cooldown = database.get_partner_withdrawal_cooldown(user['id'])
+            if cooldown:
+                hours_left = max(1, (cooldown['seconds_left'] + 3599) // 3600)
+                return (jsonify({'error': f'Вывод доступен не чаще 1 раза в 24 часа. Попробуйте через {hours_left} ч.'}), 429)
     if method == 'ton_usdt':
         from backend.ton.transfer import is_ton_recipient_format, resolve_ton_recipient, rub_to_usdt, rub_to_usdt_micro, send_usdt_on_ton
         if amount < 10:
@@ -1820,10 +1826,10 @@ def request_withdrawal():
         if net != 'TON':
             return (jsonify({'error': 'Поддерживается только сеть TON'}), 400)
         if not is_ton_recipient_format(wallet_raw):
-            return (jsonify({'error': 'Некорректный адрес или домен (UQ/EQ, .ton, .t.me, @username)'}), 400)
+            return (jsonify({'error': 'Некорректный TON-адрес. Укажите кошелёк EQ... или UQ...'}), 400)
         wallet_addr = resolve_ton_recipient(wallet_raw)
         if not wallet_addr:
-            return (jsonify({'error': 'Не удалось определить TON-кошелёк. Проверьте адрес или домен'}), 400)
+            return (jsonify({'error': 'Не удалось разобрать TON-адрес. Проверьте кошелёк'}), 400)
         try:
             usdt_amount = rub_to_usdt(amount)
             usdt_micro = rub_to_usdt_micro(amount)
@@ -1832,7 +1838,7 @@ def request_withdrawal():
         if usdt_micro < 1:
             return (jsonify({'error': 'Сумма слишком мала для конвертации в USDT'}), 400)
         description = f'Вывод {amount}₽ в USDT (TON). Получатель: {wallet_raw} → {wallet_addr}. Курс: 85₽ = 1$. Получит: {usdt_amount} USDT'
-        transaction_id, prep_err = database.prepare_ton_withdrawal(user['id'], amount, description)
+        transaction_id, prep_err = database.prepare_ton_withdrawal(user['id'], amount, description, cooldown_seconds=0 if is_admin else database.PARTNER_WITHDRAW_COOLDOWN_SECONDS)
         if prep_err == 'rate_limit':
             return (jsonify({'error': 'Вывод доступен не чаще 1 раза в 24 часа'}), 429)
         if prep_err == 'invalid_amount':
@@ -1887,7 +1893,7 @@ def request_withdrawal():
                 description = f'Заявка на вывод {amount}₽ в криптовалюте. Сеть: {crypto_net}, Адрес: {crypto_addr}'
                 details = f'🌐 Сеть: {crypto_net}\n📝 Адрес: {crypto_addr}'
                 payment_method = 'Crypto'
-            transaction_id, prep_err = database.prepare_partner_withdrawal(user['id'], amount, description, payment_method)
+            transaction_id, prep_err = database.prepare_partner_withdrawal(user['id'], amount, description, payment_method, cooldown_seconds=0 if is_admin else database.PARTNER_WITHDRAW_COOLDOWN_SECONDS)
             if prep_err == 'rate_limit':
                 conn.close()
                 return (jsonify({'error': 'Вывод доступен не чаще 1 раза в 24 часа'}), 429)
