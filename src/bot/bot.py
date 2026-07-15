@@ -70,19 +70,71 @@ def build_happ_redirect_url(encrypted_link: str) -> str:
         return f'{origin}/api/redirect?url={quote(encrypted_link, safe="")}'
     return encrypted_link
 
-def migration_welcome_keyboard(has_pending_subscription: bool) -> InlineKeyboardMarkup:
-    if not has_pending_subscription:
-        return None
+def migration_happ_keyboard(subscription_url: str):
+    """URL-кнопка «Добавить подписку» с Happ encrypt (как в миниаппе)."""
+    if not subscription_url:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')]]
+        )
+    encrypted = encrypt_subscription_for_happ(subscription_url)
+    if encrypted:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', url=build_happ_redirect_url(encrypted))]]
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')]]
     )
 
-def has_pending_migration_subscription(user) -> bool:
-    if not user.get('migrated_subscription_until'):
-        return False
-    if get_active_subscription_url(user['id']):
-        return False
-    return True
+def parse_migrated_until(user):
+    raw = user.get('migrated_subscription_until')
+    if not raw:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(raw).replace('Z', '+00:00').replace('+00:00', ''))
+    except Exception:
+        return None
+
+def provision_migrated_subscription(user, username: str):
+    """Создаёт ключ Remnawave под перенесённую дату. Идемпотентно."""
+    existing = get_active_subscription_url(user['id'])
+    if existing:
+        return {'subscription_url': existing, 'created': False}
+    until = parse_migrated_until(user)
+    if not until:
+        return None
+    from datetime import datetime
+    if until <= datetime.now():
+        return None
+    result = core.create_user_and_subscription(
+        telegram_id=user['telegram_id'],
+        username=username or user.get('username') or '',
+        expire_at=until,
+        traffic_limit=0,
+        plan_type='vpn_regular',
+        devices_limit=2,
+        force_new=False,
+    )
+    if not result:
+        return None
+    url = result.get('subscription_url') or get_active_subscription_url(user['id'])
+    if not url:
+        return None
+    days = database.get_migration_subscription_days(user)
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO transactions (user_id, type, amount, status, description, duration_days)
+            VALUES (?, 'subscription', 0, 'Success', ?, ?)
+            """,
+            (user['id'], f'Автовыдача ключа после миграции из 12VPN (до {until.isoformat()})', days or None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {'subscription_url': url, 'created': True}
 
 def get_active_subscription_url(user_id: int):
     conn = database.get_db_connection()
@@ -143,16 +195,35 @@ async def cmd_start(message: types.Message):
     if ban_status.get('banned'):
         await message.answer('❌ Ваш аккаунт заблокирован.\n\nЕсли вы считаете, что это ошибка, свяжитесь со службой поддержки.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Служба поддержки', url=SUPPORT_URL)]]))
         return
+
     if user.get('needs_migration_welcome'):
-        has_pending = has_pending_migration_subscription(user)
+        migration_kb = None
+        if user.get('migrated_subscription_until'):
+            username = message.from_user.username or user.get('username') or ''
+            try:
+                provisioned = await asyncio.to_thread(provision_migrated_subscription, user, username)
+            except Exception as e:
+                logger.error(f'Migration provision failed for {telegram_id}: {e}')
+                import traceback
+                traceback.print_exc()
+                provisioned = None
+            if provisioned and provisioned.get('subscription_url'):
+                migration_kb = migration_happ_keyboard(provisioned['subscription_url'])
+                database.clear_migration_welcome(user['id'])
+            else:
+                # Remnawave/squads могут быть не настроены — кнопка повторит выдачу
+                migration_kb = InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')]]
+                )
+                logger.error(f'Migration: no key for telegram_id={telegram_id} (check Remnawave + squads)')
+        else:
+            database.clear_migration_welcome(user['id'])
         await message.answer(
             MIGRATION_WELCOME_TEXT,
             parse_mode=ParseMode.HTML,
-            reply_markup=migration_welcome_keyboard(has_pending),
+            reply_markup=migration_kb,
         )
-        # Balance-only migrants: show notice once. Sub migrants: keep until they add the key.
-        if not has_pending:
-            database.clear_migration_welcome(user['id'])
+
     text = '<tg-emoji emoji-id="6028346797368283073">✈️</tg-emoji> Привет, мы — 1FEDERAL VPN!\n\nБезопасный VPN, который использует новейшие технологии для обхода блокировок и безопасности в интернете.\n\nНажми на кнопку, чтобы начать <tg-emoji emoji-id="5305522282695768654">👇</tg-emoji>'
     keyboard = None
     if WEB_APP_URL:
@@ -165,86 +236,39 @@ async def handle_migrate_add_sub(callback: CallbackQuery):
     try:
         telegram_id = callback.from_user.id
         user = database.get_user_by_telegram_id(telegram_id)
-        if not user:
-            await callback.answer('Пользователь не найден', show_alert=True)
+        if not user or not user.get('migrated_from_12vpn'):
+            await callback.answer('Недоступно', show_alert=True)
             return
-        if not user.get('migrated_from_12vpn'):
-            await callback.answer('Миграция недоступна', show_alert=True)
+        await callback.answer('Готовим ссылку…')
+        username = callback.from_user.username or user.get('username') or ''
+        provisioned = await asyncio.to_thread(provision_migrated_subscription, user, username)
+        if not provisioned or not provisioned.get('subscription_url'):
+            await callback.message.answer('❌ Не удалось создать подписку. Проверьте Remnawave / squads в панели или откройте приложение.')
             return
-        await callback.answer('Создаём подписку…')
-        subscription_url = get_active_subscription_url(user['id'])
-        if not subscription_url:
-            days = database.get_migration_subscription_days(user)
-            if days <= 0:
-                await callback.message.answer(
-                    '❌ Срок перенесённой подписки истёк. Оформите новую в приложении.',
-                    reply_markup=migration_welcome_keyboard(False),
-                )
-                database.clear_migration_welcome(user['id'])
-                return
-            username = callback.from_user.username or user.get('username') or ''
-            result = core.create_user_and_subscription(
-                telegram_id=telegram_id,
-                username=username,
-                days=days,
-                traffic_limit=0,
-                plan_type='vpn_regular',
-                devices_limit=2,
-                force_new=False,
-            )
-            if not result:
-                await callback.message.answer('❌ Не удалось создать подписку. Попробуйте позже или откройте приложение.')
-                return
-            subscription_url = result.get('subscription_url') or ''
-            if not subscription_url:
-                subscription_url = get_active_subscription_url(user['id']) or ''
-            if not subscription_url:
-                await callback.message.answer('❌ Подписка создана, но ссылка не получена. Откройте приложение.')
-                database.clear_migration_welcome(user['id'])
-                return
-            conn = database.get_db_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO transactions (user_id, type, amount, status, description, duration_days)
-                    VALUES (?, 'subscription', 0, 'Success', ?, ?)
-                    """,
-                    (user['id'], f'Выдача нового ключа после миграции из 12VPN ({days} дн.)', days),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        encrypted = encrypt_subscription_for_happ(subscription_url)
+        encrypted = encrypt_subscription_for_happ(provisioned['subscription_url'])
         if not encrypted:
             rows = []
             if WEB_APP_URL:
                 rows.append([InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))])
             await callback.message.answer(
-                '✅ Подписка готова, но не удалось подготовить ссылку для Happ.\n'
-                'Откройте приложение и добавьте ключ вручную.',
+                '✅ Подписка создана, но Happ-ссылка не собралась. Откройте приложение.',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
             )
             database.clear_migration_welcome(user['id'])
             return
         redirect_url = build_happ_redirect_url(encrypted)
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text='📲 Открыть в Happ', url=redirect_url)]]
-        )
-        if WEB_APP_URL:
-            keyboard.inline_keyboard.append(
-                [InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]
-            )
         await callback.message.answer(
-            '✅ Новый ключ готов!\n\nНажмите кнопку ниже, чтобы добавить подписку в Happ.',
-            reply_markup=keyboard,
+            '✅ Нажмите кнопку, чтобы добавить подписку в Happ.',
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', url=redirect_url)]]
+            ),
         )
         database.clear_migration_welcome(user['id'])
     except Exception as e:
         logger.error(f'Error in migrate_add_sub: {e}')
         import traceback
         traceback.print_exc()
-        await callback.answer('Ошибка создания подписки', show_alert=True)
+        await callback.answer('Ошибка', show_alert=True)
 
 withdrawal_reject_states = {}
 
