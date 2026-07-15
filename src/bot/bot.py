@@ -71,12 +71,18 @@ def build_happ_redirect_url(encrypted_link: str) -> str:
     return encrypted_link
 
 def migration_welcome_keyboard(has_pending_subscription: bool) -> InlineKeyboardMarkup:
-    rows = []
-    if has_pending_subscription:
-        rows.append([InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')])
-    if WEB_APP_URL:
-        rows.append([InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))])
-    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+    if not has_pending_subscription:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')]]
+    )
+
+def has_pending_migration_subscription(user) -> bool:
+    if not user.get('migrated_subscription_until'):
+        return False
+    if get_active_subscription_url(user['id']):
+        return False
+    return True
 
 def get_active_subscription_url(user_id: int):
     conn = database.get_db_connection()
@@ -138,16 +144,15 @@ async def cmd_start(message: types.Message):
         await message.answer('❌ Ваш аккаунт заблокирован.\n\nЕсли вы считаете, что это ошибка, свяжитесь со службой поддержки.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Служба поддержки', url=SUPPORT_URL)]]))
         return
     if user.get('needs_migration_welcome'):
-        days_left = database.get_migration_subscription_days(user)
-        has_pending = days_left > 0 and not get_active_subscription_url(user['id'])
+        has_pending = has_pending_migration_subscription(user)
         await message.answer(
             MIGRATION_WELCOME_TEXT,
             parse_mode=ParseMode.HTML,
             reply_markup=migration_welcome_keyboard(has_pending),
         )
+        # Balance-only migrants: show notice once. Sub migrants: keep until they add the key.
         if not has_pending:
             database.clear_migration_welcome(user['id'])
-        return
     text = '<tg-emoji emoji-id="6028346797368283073">✈️</tg-emoji> Привет, мы — 1FEDERAL VPN!\n\nБезопасный VPN, который использует новейшие технологии для обхода блокировок и безопасности в интернете.\n\nНажми на кнопку, чтобы начать <tg-emoji emoji-id="5305522282695768654">👇</tg-emoji>'
     keyboard = None
     if WEB_APP_URL:
