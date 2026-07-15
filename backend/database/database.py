@@ -38,6 +38,18 @@ def init_database():
             cursor.execute('ALTER TABLE users ADD COLUMN referral_withdraw_blocked INTEGER DEFAULT 0')
         except sqlite3.OperationalError:
             pass
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN migrated_from_12vpn INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN needs_migration_welcome INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN migrated_subscription_until TIMESTAMP')
+        except sqlite3.OperationalError:
+            pass
         cursor.execute("\n            CREATE TABLE IF NOT EXISTS vpn_keys (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                key_uuid TEXT UNIQUE,\n                key_config TEXT,\n                status TEXT DEFAULT 'Active',\n                expiry_date TIMESTAMP,\n                traffic_used REAL DEFAULT 0,\n                traffic_limit REAL,\n                devices_limit INTEGER DEFAULT 1,\n                server_location TEXT,\n                hwid_hash TEXT,\n                last_used TIMESTAMP,\n                last_ip TEXT,\n                squad_uuid TEXT,\n                plan_type TEXT DEFAULT 'vpn',\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )\n        ")
         cursor.execute("\n            CREATE TABLE IF NOT EXISTS transactions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                type TEXT NOT NULL,\n                amount REAL NOT NULL,\n                status TEXT DEFAULT 'Pending',\n                payment_method TEXT,\n                payment_provider TEXT,\n                payment_id TEXT,\n                description TEXT,\n                duration_days INTEGER,\n                hash TEXT,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )\n        ")
         try:
@@ -1035,5 +1047,33 @@ def get_subscription_plan_distribution() -> Dict[str, Any]:
         return {'items': items, 'totalPurchases': total_purchases, 'totalUsers': total_users}
     finally:
         conn.close()
+def clear_migration_welcome(user_id: int) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '\n            UPDATE users\n            SET needs_migration_welcome = 0, updated_at = CURRENT_TIMESTAMP\n            WHERE id = ?\n            ',
+            (user_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+def get_migration_subscription_days(user: Dict[str, Any]) -> int:
+    """Days left until migrated_subscription_until (at least 1 if date is set and in the future)."""
+    until_raw = user.get('migrated_subscription_until')
+    if not until_raw:
+        return 0
+    try:
+        until = datetime.fromisoformat(str(until_raw).replace('Z', '+00:00').replace('+00:00', ''))
+    except Exception:
+        return 0
+    delta = until - datetime.now()
+    secs = delta.total_seconds()
+    if secs <= 0:
+        return 0
+    return max(1, int((secs + 86399) // 86400))
+
 if __name__ != '__main__':
     init_database()
