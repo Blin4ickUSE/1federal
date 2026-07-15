@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+from urllib.parse import quote
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, CallbackQuery
@@ -22,12 +23,79 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+MIGRATION_WELCOME_TEXT = (
+    '👋 <b>12VPN теперь 1FEDERAL</b>\n\n'
+    'Все ваши подписки и балансы были успешно перенесены, однако ключи изменились. '
+    'Добавьте новый ключ прямо сейчас.\n'
+    'В качестве извинений за неудобства, добавили каждому 1 месяц к существующим подпискам.'
+)
+
 def extract_referral_id(text: str) -> int:
     match = re.search('ref(\\d+)', text)
     if match:
         return int(match.group(1))
     match = re.search('ref=(\\d+)', text)
     return int(match.group(1)) if match else None
+
+def _public_origin() -> str:
+    if WEB_APP_URL:
+        return WEB_APP_URL.rstrip('/')
+    api_url = os.getenv('API_URL', '').rstrip('/')
+    if api_url.endswith('/api'):
+        return api_url[:-4]
+    return api_url
+
+def encrypt_subscription_for_happ(subscription_url: str):
+    import requests as req
+    try:
+        response = req.post(
+            'https://crypto.happ.su/api.php',
+            json={'url': subscription_url},
+            headers={'Content-Type': 'application/json'},
+            timeout=10,
+        )
+        if response.ok:
+            result = response.json()
+            encrypted = result.get('encrypted_link') if isinstance(result, dict) else None
+            if encrypted:
+                return encrypted
+        logger.error(f'Happ encryption failed: {response.status_code} {response.text}')
+    except Exception as e:
+        logger.error(f'Happ encryption error: {e}')
+    return None
+
+def build_happ_redirect_url(encrypted_link: str) -> str:
+    origin = _public_origin()
+    if origin:
+        return f'{origin}/api/redirect?url={quote(encrypted_link, safe="")}'
+    return encrypted_link
+
+def migration_welcome_keyboard(has_pending_subscription: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_pending_subscription:
+        rows.append([InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')])
+    if WEB_APP_URL:
+        rows.append([InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+def get_active_subscription_url(user_id: int):
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT key_config FROM vpn_keys
+            WHERE user_id = ? AND status = 'Active'
+              AND key_config IS NOT NULL AND TRIM(key_config) != ''
+              AND (key_uuid IS NULL OR key_uuid NOT LIKE 'pending-12vpn-%')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        return row['key_config'] if row else None
+    finally:
+        conn.close()
 
 @dp.message(CommandStart())
 
@@ -69,11 +137,110 @@ async def cmd_start(message: types.Message):
     if ban_status.get('banned'):
         await message.answer('❌ Ваш аккаунт заблокирован.\n\nЕсли вы считаете, что это ошибка, свяжитесь со службой поддержки.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Служба поддержки', url=SUPPORT_URL)]]))
         return
+    if user.get('needs_migration_welcome'):
+        days_left = database.get_migration_subscription_days(user)
+        has_pending = days_left > 0 and not get_active_subscription_url(user['id'])
+        await message.answer(
+            MIGRATION_WELCOME_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=migration_welcome_keyboard(has_pending),
+        )
+        if not has_pending:
+            database.clear_migration_welcome(user['id'])
+        return
     text = '<tg-emoji emoji-id="6028346797368283073">✈️</tg-emoji> Привет, мы — 1FEDERAL VPN!\n\nБезопасный VPN, который использует новейшие технологии для обхода блокировок и безопасности в интернете.\n\nНажми на кнопку, чтобы начать <tg-emoji emoji-id="5305522282695768654">👇</tg-emoji>'
     keyboard = None
     if WEB_APP_URL:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]])
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+@dp.callback_query(F.data == 'migrate_add_sub')
+
+async def handle_migrate_add_sub(callback: CallbackQuery):
+    try:
+        telegram_id = callback.from_user.id
+        user = database.get_user_by_telegram_id(telegram_id)
+        if not user:
+            await callback.answer('Пользователь не найден', show_alert=True)
+            return
+        if not user.get('migrated_from_12vpn'):
+            await callback.answer('Миграция недоступна', show_alert=True)
+            return
+        await callback.answer('Создаём подписку…')
+        subscription_url = get_active_subscription_url(user['id'])
+        if not subscription_url:
+            days = database.get_migration_subscription_days(user)
+            if days <= 0:
+                await callback.message.answer(
+                    '❌ Срок перенесённой подписки истёк. Оформите новую в приложении.',
+                    reply_markup=migration_welcome_keyboard(False),
+                )
+                database.clear_migration_welcome(user['id'])
+                return
+            username = callback.from_user.username or user.get('username') or ''
+            result = core.create_user_and_subscription(
+                telegram_id=telegram_id,
+                username=username,
+                days=days,
+                traffic_limit=0,
+                plan_type='vpn_regular',
+                devices_limit=2,
+                force_new=False,
+            )
+            if not result:
+                await callback.message.answer('❌ Не удалось создать подписку. Попробуйте позже или откройте приложение.')
+                return
+            subscription_url = result.get('subscription_url') or ''
+            if not subscription_url:
+                subscription_url = get_active_subscription_url(user['id']) or ''
+            if not subscription_url:
+                await callback.message.answer('❌ Подписка создана, но ссылка не получена. Откройте приложение.')
+                database.clear_migration_welcome(user['id'])
+                return
+            conn = database.get_db_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO transactions (user_id, type, amount, status, description, duration_days)
+                    VALUES (?, 'subscription', 0, 'Success', ?, ?)
+                    """,
+                    (user['id'], f'Выдача нового ключа после миграции из 12VPN ({days} дн.)', days),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        encrypted = encrypt_subscription_for_happ(subscription_url)
+        if not encrypted:
+            rows = []
+            if WEB_APP_URL:
+                rows.append([InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))])
+            await callback.message.answer(
+                '✅ Подписка готова, но не удалось подготовить ссылку для Happ.\n'
+                'Откройте приложение и добавьте ключ вручную.',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
+            )
+            database.clear_migration_welcome(user['id'])
+            return
+        redirect_url = build_happ_redirect_url(encrypted)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text='📲 Открыть в Happ', url=redirect_url)]]
+        )
+        if WEB_APP_URL:
+            keyboard.inline_keyboard.append(
+                [InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]
+            )
+        await callback.message.answer(
+            '✅ Новый ключ готов!\n\nНажмите кнопку ниже, чтобы добавить подписку в Happ.',
+            reply_markup=keyboard,
+        )
+        database.clear_migration_welcome(user['id'])
+    except Exception as e:
+        logger.error(f'Error in migrate_add_sub: {e}')
+        import traceback
+        traceback.print_exc()
+        await callback.answer('Ошибка создания подписки', show_alert=True)
+
 withdrawal_reject_states = {}
 
 @dp.callback_query(F.data.startswith('withdraw_approve_'))
