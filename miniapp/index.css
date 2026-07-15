@@ -92,11 +92,40 @@ body {
   animation: pulse 2s ease-in-out infinite;
 }
 
+@keyframes pageEnter {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.page-enter {
+  animation: pageEnter 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.stagger-children > * {
+  opacity: 0;
+  animation: slideUp 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0.04s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.09s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.14s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.19s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.24s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.29s; }
+.stagger-children > *:nth-child(7) { animation-delay: 0.34s; }
+.stagger-children > *:nth-child(8) { animation-delay: 0.39s; }
+.stagger-children > *:nth-child(n+9) { animation-delay: 0.44s; }
+
 .stagger-1 { animation-delay: 0.05s; }
 .stagger-2 { animation-delay: 0.1s; }
 .stagger-3 { animation-delay: 0.15s; }
 .stagger-4 { animation-delay: 0.2s; }
 .stagger-5 { animation-delay: 0.25s; }
+
+.miniapp-shell {
+  padding-top: var(--tg-safe-top, env(safe-area-inset-top, 0px));
+  padding-bottom: var(--tg-safe-bottom, env(safe-area-inset-bottom, 0px));
+  min-height: 100dvh;
+}
 
 .skeleton {
   background: linear-gradient(90deg, rgba(51, 65, 85, 0.5) 0%, rgba(71, 85, 105, 0.5) 50%, rgba(51, 65, 85, 0.5) 100%);
@@ -105,8 +134,12 @@ body {
   border-radius: 8px;
 }
 
-button, a, input, select, textarea {
-  transition: all 0.2s ease;
+button, a, select {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+}
+
+input, textarea {
+  transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 
 .card-hover {

@@ -69,7 +69,7 @@ async def cmd_start(message: types.Message):
     if ban_status.get('banned'):
         await message.answer('❌ Ваш аккаунт заблокирован.\n\nЕсли вы считаете, что это ошибка, свяжитесь со службой поддержки.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Служба поддержки', url=SUPPORT_URL)]]))
         return
-    text = '<tg-emoji emoji-id="6028346797368283073">✈️</tg-emoji> <b>Привет, мы — 1FEDERAL VPN!</b>\n\nБезопасный VPN, который использует новейшие технологии для защиты ваших данных в интернете.\n\nНажми на кнопку, чтобы начать <tg-emoji emoji-id="5305522282695768654">👇</tg-emoji>'
+    text = '<tg-emoji emoji-id="6028346797368283073">✈️</tg-emoji> Привет, мы — 1FEDERAL VPN!\n\nБезопасный VPN, который использует новейшие технологии для обхода блокировок и безопасности в интернете.\n\nНажми на кнопку, чтобы начать <tg-emoji emoji-id="5305522282695768654">👇</tg-emoji>'
     keyboard = None
     if WEB_APP_URL:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]])

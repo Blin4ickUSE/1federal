@@ -13,13 +13,13 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../'))
 from backend.database import database
 from backend.core import core, abuse_detected
-from backend.api import remnawave, lava
+from backend.api import remnawave, platega
 from backend.core.blacklist_updater import start_blacklist_updater
 app = Flask(__name__)
 CORS(app, resources={'/api/*': {'origins': '*'}})
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-ENV_KEYS_MANAGED = {'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID', 'TELEGRAM_ADMIN_IDS', 'REMWAVE_PANEL_URL', 'REMWAVE_API_KEY', 'LAVA_SHOP_ID', 'LAVA_SECRET_KEY', 'LAVA_SECRET_KEY_2', 'TRIAL_HOURS'}
+ENV_KEYS_MANAGED = {'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID', 'TELEGRAM_ADMIN_IDS', 'REMWAVE_PANEL_URL', 'REMWAVE_API_KEY', 'PLATEGA_MERCHANT_ID', 'PLATEGA_SECRET_KEY', 'PLATEGA_API_URL', 'TRIAL_HOURS'}
 
 def _parse_admin_ids() -> list[int]:
     raw = os.getenv('TELEGRAM_ADMIN_IDS') or os.getenv('TELEGRAM_ADMIN_ID', '')
@@ -462,30 +462,30 @@ def create_payment():
     return_url = f'{miniapp_url}/success' if miniapp_url else None
     failed_url = f'{miniapp_url}/failed' if miniapp_url else None
     try:
-        if method == 'lava_card':
-            payment = lava.lava_api.create_card_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
+        if method == 'platega_card':
+            payment = platega.platega_api.create_card_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
             if isinstance(payment, dict) and payment.get('ok') is False:
                 details = payment.get('details') or payment
                 provider_resp = details.get('response') if isinstance(details, dict) else None
                 msg = None
                 if isinstance(provider_resp, dict):
-                    msg = provider_resp.get('message') or provider_resp.get('error')
+                    msg = provider_resp.get('message') or provider_resp.get('error') or provider_resp.get('title')
                 if not msg:
                     msg = payment.get('error')
-                return (jsonify({'error': msg or 'Lava error', 'provider': 'lava', 'details': provider_resp or details}), 400)
+                return (jsonify({'error': msg or 'Platega error', 'provider': 'platega', 'details': provider_resp or details}), 400)
             if payment and payment.get('ok') is True:
                 return jsonify({'payment_id': payment.get('id'), 'payment_url': payment.get('redirect_url'), 'status': payment.get('status', 'pending')})
-        elif method == 'lava_sbp':
-            payment = lava.lava_api.create_sbp_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
+        elif method == 'platega_sbp':
+            payment = platega.platega_api.create_sbp_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
             if isinstance(payment, dict) and payment.get('ok') is False:
                 details = payment.get('details') or payment
                 provider_resp = details.get('response') if isinstance(details, dict) else None
                 msg = None
                 if isinstance(provider_resp, dict):
-                    msg = provider_resp.get('message') or provider_resp.get('error')
+                    msg = provider_resp.get('message') or provider_resp.get('error') or provider_resp.get('title')
                 if not msg:
                     msg = payment.get('error')
-                return (jsonify({'error': msg or 'Lava error', 'provider': 'lava', 'details': provider_resp or details}), 400)
+                return (jsonify({'error': msg or 'Platega error', 'provider': 'platega', 'details': provider_resp or details}), 400)
             if payment and payment.get('ok') is True:
                 return jsonify({'payment_id': payment.get('id'), 'payment_url': payment.get('redirect_url'), 'status': payment.get('status', 'pending')})
         else:
@@ -2323,7 +2323,7 @@ def get_public_page(page_type: str):
 @require_auth
 
 def get_settings():
-    env_settings = {'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN', ''), 'TELEGRAM_ADMIN_IDS': os.getenv('TELEGRAM_ADMIN_IDS', os.getenv('TELEGRAM_ADMIN_ID', '')), 'REMWAVE_PANEL_URL': os.getenv('REMWAVE_PANEL_URL', os.getenv('REMWAVE_API_URL', '')), 'REMWAVE_API_KEY': os.getenv('REMWAVE_API_KEY', ''), 'LAVA_SHOP_ID': os.getenv('LAVA_SHOP_ID', ''), 'LAVA_SECRET_KEY': os.getenv('LAVA_SECRET_KEY', ''), 'LAVA_SECRET_KEY_2': os.getenv('LAVA_SECRET_KEY_2', ''), 'TRIAL_HOURS': os.getenv('TRIAL_HOURS', '24'), 'PANEL_PASSWORD_SET': '1'}
+    env_settings = {'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN', ''), 'TELEGRAM_ADMIN_IDS': os.getenv('TELEGRAM_ADMIN_IDS', os.getenv('TELEGRAM_ADMIN_ID', '')), 'REMWAVE_PANEL_URL': os.getenv('REMWAVE_PANEL_URL', os.getenv('REMWAVE_API_URL', '')), 'REMWAVE_API_KEY': os.getenv('REMWAVE_API_KEY', ''), 'PLATEGA_MERCHANT_ID': os.getenv('PLATEGA_MERCHANT_ID', ''), 'PLATEGA_SECRET_KEY': os.getenv('PLATEGA_SECRET_KEY', ''), 'PLATEGA_API_URL': os.getenv('PLATEGA_API_URL', 'https://app.platega.io'), 'TRIAL_HOURS': os.getenv('TRIAL_HOURS', '24'), 'PANEL_PASSWORD_SET': '1'}
     return jsonify(env_settings)
 
 @app.route('/api/panel/settings', methods=['PUT'])
@@ -2350,6 +2350,8 @@ def update_settings():
             updates['TELEGRAM_ADMIN_ID'] = os.environ['TELEGRAM_ADMIN_ID']
         if updates:
             _save_env_map(env_path, updates)
+        if any(k.startswith('PLATEGA_') for k in updates):
+            platega.platega_api.reload_from_env()
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f'Error updating settings: {e}')
@@ -2426,7 +2428,7 @@ def get_payment_settings():
             if provider not in settings:
                 settings[provider] = {}
             settings[provider][row['setting_key']] = row['setting_value']
-        providers = ['lava']
+        providers = ['platega']
         for p in providers:
             if p not in settings:
                 settings[p] = {'enabled': '0'}
@@ -2446,13 +2448,21 @@ def update_payment_settings(provider: str):
         for key, value in data.items():
             cursor.execute('\n                INSERT OR REPLACE INTO payment_provider_settings (provider, setting_key, setting_value, updated_at)\n                VALUES (?, ?, ?, CURRENT_TIMESTAMP)\n            ', (provider, key, str(value)))
         conn.commit()
-        if provider == 'lava':
-            if 'shop_id' in data:
-                os.environ['LAVA_SHOP_ID'] = str(data['shop_id'])
+        if provider == 'platega':
+            env_updates = {}
+            if 'merchant_id' in data:
+                os.environ['PLATEGA_MERCHANT_ID'] = str(data['merchant_id'])
+                env_updates['PLATEGA_MERCHANT_ID'] = str(data['merchant_id'])
             if 'secret_key' in data:
-                os.environ['LAVA_SECRET_KEY'] = str(data['secret_key'])
-            if 'secret_key_2' in data:
-                os.environ['LAVA_SECRET_KEY_2'] = str(data['secret_key_2'])
+                os.environ['PLATEGA_SECRET_KEY'] = str(data['secret_key'])
+                env_updates['PLATEGA_SECRET_KEY'] = str(data['secret_key'])
+            if 'api_url' in data:
+                os.environ['PLATEGA_API_URL'] = str(data['api_url'])
+                env_updates['PLATEGA_API_URL'] = str(data['api_url'])
+            if env_updates:
+                env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
+                _save_env_map(env_path, env_updates)
+            platega.platega_api.reload_from_env()
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f'Error updating payment settings for {provider}: {e}')

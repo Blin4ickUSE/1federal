@@ -49,6 +49,16 @@
           s.onload = function () {
             clearTimeout(timer);
             done = true;
+            try {
+              var tg = window.Telegram && window.Telegram.WebApp;
+              if (!tg) return;
+              tg.ready();
+              tg.expand();
+              if (typeof tg.setHeaderColor === 'function') tg.setHeaderColor('#000000');
+              if (typeof tg.setBackgroundColor === 'function') tg.setBackgroundColor('#000000');
+              if (typeof tg.setBottomBarColor === 'function') tg.setBottomBarColor('#000000');
+              if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen();
+            } catch (e) {}
           };
           s.onerror = function () {
             clearTimeout(timer);

@@ -219,7 +219,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    location /lava {
+    location /platega {
         proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -298,10 +298,9 @@ TELEGRAM_ADMIN_ID=${TELEGRAM_ADMIN_ID}
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
 
-LAVA_SHOP_ID=
-LAVA_SECRET_KEY=
-LAVA_SECRET_KEY_2=
-LAVA_HOOK_URL=
+PLATEGA_MERCHANT_ID=
+PLATEGA_SECRET_KEY=
+PLATEGA_API_URL=https://app.platega.io
 
 NALOG_ENABLED=false
 NALOG_INN=
@@ -536,7 +535,7 @@ ${BOLD}API:${NC}
   ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/api${NC}
 
 ${BOLD}Webhooks:${NC}
-  Lava:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/lava${NC}
+  Platega:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/platega${NC}
 
 ${BOLD}Авторизация в панели:${NC}
   ${CYAN}При первом входе в панель будут автоматически созданы${NC}

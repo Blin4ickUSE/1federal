@@ -99,7 +99,7 @@ def init_database():
             cursor.execute('SELECT COUNT(*) FROM public_pages WHERE page_type = ?', (page_type,))
             if cursor.fetchone()[0] == 0:
                 cursor.execute("INSERT INTO public_pages (page_type, content) VALUES (?, '')", (page_type,))
-        for method in ['lava', 'crypto']:
+        for method in ['platega', 'platega_sbp', 'platega_card', 'crypto']:
             cursor.execute('SELECT COUNT(*) FROM payment_fees WHERE payment_method = ?', (method,))
             if cursor.fetchone()[0] == 0:
                 cursor.execute('INSERT INTO payment_fees (payment_method) VALUES (?)', (method,))

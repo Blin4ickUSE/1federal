@@ -59,6 +59,42 @@ function isLikelyTelegramWebApp(): boolean {
   return /\bTelegram\b/i.test(ua) || /TelegramDesktop/i.test(ua);
 }
 
+function setupTelegramFullscreen(tg: any) {
+  if (!tg) return;
+  try { tg.ready(); } catch {}
+  try { tg.expand(); } catch {}
+  try {
+    if (typeof tg.setHeaderColor === 'function') tg.setHeaderColor('#000000');
+    if (typeof tg.setBackgroundColor === 'function') tg.setBackgroundColor('#000000');
+    if (typeof tg.setBottomBarColor === 'function') tg.setBottomBarColor('#000000');
+  } catch {}
+  try {
+    if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes();
+  } catch {}
+  try {
+    if (typeof tg.requestFullscreen === 'function' && !tg.isFullscreen) {
+      tg.requestFullscreen();
+    }
+  } catch {}
+  try {
+    tg.onEvent?.('viewportChanged', () => {
+      try {
+        if (!tg.isExpanded) tg.expand();
+      } catch {}
+    });
+  } catch {}
+}
+
+function applyTelegramSafeArea(tg: any) {
+  if (!tg || typeof document === 'undefined') return;
+  const sa = tg.safeAreaInset || {};
+  const csa = tg.contentSafeAreaInset || {};
+  const top = Number(sa.top || 0) + Number(csa.top || 0);
+  const bottom = Number(sa.bottom || 0) + Number(csa.bottom || 0);
+  document.documentElement.style.setProperty('--tg-safe-top', `${top}px`);
+  document.documentElement.style.setProperty('--tg-safe-bottom', `${bottom}px`);
+}
+
 function getMiniAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
   const win = window as any;
@@ -316,8 +352,8 @@ const mapApiTariffCategory = (planType: string): 'regular' | 'family' => {
 };
 
 const PAYMENT_METHODS_DEFAULT: PaymentMethod[] = [
-  { id: 'lava_sbp', name: 'СБП', icon: '⚡', feePercent: 0 },
-  { id: 'lava_card', name: 'Банковская карта', icon: '💳', feePercent: 0 },
+  { id: 'platega_sbp', name: 'СБП', icon: '⚡', feePercent: 0 },
+  { id: 'platega_card', name: 'Банковская карта', icon: '💳', feePercent: 0 },
 ];
 
 const PLATFORMS: { id: PlatformId; name: string; icon: React.ReactNode }[] = [
@@ -629,6 +665,10 @@ export default function App() {
   const [wizardPlatform, setWizardPlatform] = useState<PlatformId>('android');
   const [promoSubscriptionDays, setPromoSubscriptionDays] = useState<number | null>(null);
   const [promoDiscountPercent, setPromoDiscountPercent] = useState<number>(0);
+  const [promoCode, setPromoCode] = useState('');
+  const [paymentChecking, setPaymentChecking] = useState(false);
+  const [paymentPolling, setPaymentPolling] = useState(false);
+  const paymentCheckingRef = useRef(false);
   const [wizardPlan, setWizardPlan] = useState<Plan | null>(null);
   const [wizardTariffTab, setWizardTariffTab] = useState<'regular' | 'family'>('regular');
   const [wizardType] = useState<'vpn'>('vpn');
@@ -911,12 +951,15 @@ export default function App() {
             }
           }
 
-          win.Telegram.WebApp.ready();
-          try { win.Telegram.WebApp.expand(); } catch {}
+          setupTelegramFullscreen(win.Telegram.WebApp);
+          applyTelegramSafeArea(win.Telegram.WebApp);
           try {
-            if (typeof win.Telegram.WebApp.disableVerticalSwipes === 'function') {
-              win.Telegram.WebApp.disableVerticalSwipes();
-            }
+            win.Telegram.WebApp.onEvent?.('safeAreaChanged', () => applyTelegramSafeArea(win.Telegram.WebApp));
+            win.Telegram.WebApp.onEvent?.('contentSafeAreaChanged', () => applyTelegramSafeArea(win.Telegram.WebApp));
+            win.Telegram.WebApp.onEvent?.('fullscreenChanged', () => applyTelegramSafeArea(win.Telegram.WebApp));
+            win.Telegram.WebApp.onEvent?.('fullscreenFailed', () => {
+              try { win.Telegram.WebApp.expand(); } catch {}
+            });
           } catch {}
         }
       } else {
@@ -1104,7 +1147,7 @@ export default function App() {
             Бесплатный пробный период
           </h3>
           <p className="text-sm text-gray-400 mb-6">
-            Попробуйте наш VPN бесплатно — без обязательств
+            Попробуйте наш VPN бесплатно
           </p>
           <div className="grid grid-cols-3 gap-3 mb-6">
             <div>
@@ -1225,6 +1268,105 @@ export default function App() {
     }
     return null;
   };
+
+  const doPaymentCheck = async () => {
+    if (paymentCheckingRef.current) return;
+    paymentCheckingRef.current = true;
+    setPaymentChecking(true);
+
+    try {
+      const oldBalance = balance;
+      const result = await refreshUserData();
+      const newBalance = result?.balance ?? oldBalance;
+
+      if (newBalance > oldBalance) {
+        setPaymentPolling(false);
+
+        if (pendingAction) {
+          const action = pendingAction;
+          const payload = action.payload;
+
+          if (newBalance >= payload.price) {
+            try {
+              const currentUserId = await ensureUserId();
+              if (currentUserId) {
+                if (action.type === 'extend' && payload.device && payload.plan) {
+                  const res = await miniApiFetch('/subscription/extend', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      user_id: currentUserId,
+                      key_id: payload.device.id,
+                      days: payload.plan.days,
+                      price: payload.price,
+                    }),
+                  });
+
+                  if (res && res.success) {
+                    setPendingAction(null);
+                    setPaymentUrl(null);
+                    setExtendingDevice(null);
+                    setExtendPlan(null);
+                    await refreshAll();
+                    setView('devices');
+                    alert('Подписка успешно продлена!');
+                    return;
+                  }
+                } else {
+                  const plan = payload.wizardPlan as Plan;
+                  const res = await miniApiFetch('/subscription/create', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      user_id: currentUserId,
+                      ...buildPlanPayload(plan, payload.price),
+                      ...(plan?.isTrial ? { is_trial: true } : {}),
+                    }),
+                  });
+
+                  if (res && res.success) {
+                    if (plan?.isTrial) setIsTrialUsed(true);
+                    setPendingAction(null);
+                    setPaymentUrl(null);
+                    setActivePlatform(wizardPlatform);
+                    await refreshAll();
+                    setWizardStep(3);
+                    setView('wizard');
+                    return;
+                  }
+                }
+              }
+            } catch (e) {
+              console.error('Failed to process pending action after payment', e);
+            }
+          }
+
+          setPendingAction(null);
+          setPaymentUrl(null);
+          alert('Оплата получена, но не удалось активировать подписку. Обратитесь в поддержку.');
+          setView('home');
+        }
+      }
+    } finally {
+      paymentCheckingRef.current = false;
+      setPaymentChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    if (view !== 'wait_payment') {
+      setPaymentPolling(false);
+      return;
+    }
+    setPaymentPolling(true);
+    return () => setPaymentPolling(false);
+  }, [view]);
+
+  useEffect(() => {
+    if (!paymentPolling || view !== 'wait_payment') return;
+    const interval = setInterval(() => {
+      doPaymentCheck();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [paymentPolling, view]);
 
   const getHappEncryptedLink = async (subscriptionUrl: string): Promise<string | null> => {
     try {
@@ -1526,7 +1668,7 @@ export default function App() {
         </div>
 
         {}
-        <div className="px-4 space-y-5">
+        <div className="px-4 space-y-5 stagger-children">
           {showTrialPromo && (
             <>
               <TrialPromoBanner />
@@ -1846,7 +1988,7 @@ export default function App() {
           </p>
         </div>
 
-        <div className="px-4 space-y-4">
+        <div className="px-4 space-y-4 stagger-children">
           {!subscription ? (
             <>
               {showTrialPromo ? (
@@ -2101,7 +2243,7 @@ export default function App() {
             }
             try {
               const total = getPaymentTotal();
-              const methodKey = selectedMethod || 'lava_sbp';
+              const methodKey = selectedMethod || 'platega_sbp';
 
               const res = await miniApiFetch('/payment/create', {
                 method: 'POST',
@@ -2138,110 +2280,8 @@ export default function App() {
     </div>
   );
 
-  const PaymentWaitView = () => {
-    const [checking, setChecking] = useState(false);
-    const [pollingActive, setPollingActive] = useState(false);
-    const checkingRef = useRef(false);
-
-    const doPaymentCheck = async () => {
-      if (checkingRef.current) return;
-      checkingRef.current = true;
-      setChecking(true);
-
-      try {
-        const oldBalance = balance;
-        const result = await refreshUserData();
-        const newBalance = result?.balance ?? oldBalance;
-
-        if (newBalance > oldBalance) {
-          setPollingActive(false);
-
-          if (pendingAction) {
-            const action = pendingAction;
-            const payload = action.payload;
-
-            if (newBalance >= payload.price) {
-              try {
-                const currentUserId = await ensureUserId();
-                if (currentUserId) {
-                  if (action.type === 'extend' && payload.device && payload.plan) {
-                    const res = await miniApiFetch('/subscription/extend', {
-                      method: 'POST',
-                      body: JSON.stringify({
-                        user_id: currentUserId,
-                        key_id: payload.device.id,
-                        days: payload.plan.days,
-                        price: payload.price,
-                      }),
-                    });
-
-                    if (res && res.success) {
-                      setPendingAction(null);
-                      setPaymentUrl(null);
-                      setExtendingDevice(null);
-                      setExtendPlan(null);
-                      await refreshAll();
-                      setView('devices');
-                      alert('Подписка успешно продлена!');
-                      return;
-                    }
-                  } else {
-                    const plan = payload.wizardPlan as Plan;
-                    const res = await miniApiFetch('/subscription/create', {
-                      method: 'POST',
-                      body: JSON.stringify({
-                        user_id: currentUserId,
-                        ...buildPlanPayload(plan, payload.price),
-                        ...(plan?.isTrial ? { is_trial: true } : {}),
-                      }),
-                    });
-
-                    if (res && res.success) {
-                      if (plan?.isTrial) setIsTrialUsed(true);
-                      setPendingAction(null);
-                      setPaymentUrl(null);
-                      setActivePlatform(wizardPlatform);
-                      await refreshAll();
-                      setWizardStep(3);
-                      setView('wizard');
-                      return;
-                    }
-                  }
-                }
-              } catch (e) {
-                console.error('Failed to process pending action after payment', e);
-              }
-            }
-
-            setPendingAction(null);
-            setPaymentUrl(null);
-            alert('Оплата получена, но не удалось активировать подписку. Обратитесь в поддержку.');
-            setView('home');
-          }
-        }
-      } finally {
-        checkingRef.current = false;
-        setChecking(false);
-      }
-    };
-
-    useEffect(() => {
-      if (!pollingActive) return;
-
-      const interval = setInterval(() => {
-        doPaymentCheck();
-      }, 3000);
-
-      return () => clearInterval(interval);
-    }, [pollingActive]);
-
-    useEffect(() => {
-      setPollingActive(true);
-      return () => setPollingActive(false);
-    }, []);
-
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[80vh] animate-in zoom-in duration-300 text-center px-4">
+  const PaymentWaitView = () => (
+      <div className="flex flex-col items-center justify-center min-h-[80vh] text-center px-4 stagger-children">
         <div className="w-24 h-24 rounded-full bg-gradient-to-br from-blue-600/20 to-purple-600/20 flex items-center justify-center mb-8 relative">
           <div className="absolute inset-0 rounded-full border-4 border-blue-500/50 border-t-blue-500 animate-spin"></div>
           <div className="absolute inset-2 rounded-full border-4 border-purple-500/30 border-b-purple-500 animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }}></div>
@@ -2271,7 +2311,7 @@ export default function App() {
           </Button>
         )}
         <div className="mt-4 text-xs text-slate-500">
-          {checking ? 'Проверка оплаты...' : 'Автоматическая проверка каждые 3 сек.'}
+          {paymentChecking ? 'Проверка оплаты...' : 'Автоматическая проверка каждые 3 сек.'}
         </div>
         <button
           onClick={() => window.open(SUPPORT_URL, '_blank')}
@@ -2279,12 +2319,11 @@ export default function App() {
         >
           <MessageCircle size={16} /> Связаться с поддержкой
         </button>
-        <button onClick={() => { setPaymentUrl(null); setPendingAction(null); setPollingActive(false); setView('home'); }} className="mt-3 text-slate-500 text-sm hover:text-slate-300">
+        <button onClick={() => { setPaymentUrl(null); setPendingAction(null); setPaymentPolling(false); setView('home'); }} className="mt-3 text-slate-500 text-sm hover:text-slate-300">
           Отменить
         </button>
       </div>
-    );
-  };
+  );
 
   const InstructionView = () => {
     const currentInstr = INSTRUCTIONS[activePlatform] || INSTRUCTIONS['android'];
@@ -2425,7 +2464,7 @@ export default function App() {
     <div className="pb-24">
       <Header title="Реферальная программа" />
 
-      <div className="px-4 space-y-6">
+      <div className="px-4 space-y-6 stagger-children">
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
             <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center mb-3">
@@ -2517,11 +2556,9 @@ export default function App() {
     );
   };
 
-  const PromoView = () => {
-    const [code, setCode] = useState('');
-    return (
+  const PromoView = () => (
       <div className="pb-24">
-        <div className="px-4 space-y-6">
+        <div className="px-4 space-y-6 stagger-children">
           <div className="text-center py-8">
             <div className="w-16 h-16 bg-purple-500/20 rounded-full flex items-center justify-center text-purple-400 mx-auto mb-4">
               <Gift size={32} />
@@ -2532,13 +2569,23 @@ export default function App() {
             </p>
           </div>
           <input
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
+            value={promoCode}
+            onChange={(e) => setPromoCode(e.target.value.toUpperCase())}
+            onFocus={(e) => {
+              // Не даём Telegram viewport / nav-indicator перехватывающе убрать фокус
+              e.currentTarget.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            inputMode="text"
+            enterKeyHint="done"
             placeholder="PROMO2025"
             className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-center text-xl font-mono text-white tracking-widest uppercase focus:border-purple-500 focus:outline-none placeholder:text-gray-600"
           />
           <Button
-            disabled={!code}
+            disabled={!promoCode}
             onClick={async () => {
               if (!userId) {
                 alert('Пользователь не загружен, попробуйте позже');
@@ -2547,7 +2594,7 @@ export default function App() {
               try {
                 const res = await miniApiFetch('/promocode/apply', {
                   method: 'POST',
-                  body: JSON.stringify({ user_id: userId, code }),
+                  body: JSON.stringify({ user_id: userId, code: promoCode }),
                 });
                 if (res.success) {
                   if (res.open_wizard_subscription && res.pending_subscription_days) {
@@ -2580,7 +2627,7 @@ export default function App() {
                 console.error(e);
                 alert('Ошибка применения промокода');
               } finally {
-                setCode('');
+                setPromoCode('');
               }
             }}
           >
@@ -2588,8 +2635,7 @@ export default function App() {
           </Button>
         </div>
       </div>
-    );
-  };
+  );
 
   if (needsLogin && !telegramId && !isBanned) {
     return (
@@ -2694,18 +2740,20 @@ export default function App() {
   }
 
   return (
-    <div className="max-w-md mx-auto bg-black min-h-screen relative text-white font-sans selection:bg-blue-500/30">
-      <div className="p-4 min-h-screen flex flex-col">
-        {view === 'home' && <HomeView />}
-        {view === 'wizard' && <WizardView />}
-        {view === 'checkout' && <CheckoutView />}
-        {view === 'wait_payment' && <PaymentWaitView />}
-        {view === 'devices' && <DevicesView />}
-        {view === 'extend_subscription' && <ExtendSubscriptionView />}
-        {view === 'instruction_view' && <InstructionView />}
-        {view === 'referral' && <ReferralView />}
-        {view === 'referral_detail' && <ReferralDetailView />}
-        {view === 'promo' && <PromoView />}
+    <div className="max-w-md mx-auto bg-black miniapp-shell relative text-white font-sans selection:bg-blue-500/30">
+      <div className="p-4 min-h-[100dvh] flex flex-col">
+        <div key={view} className="page-enter flex-1 flex flex-col">
+          {view === 'home' && HomeView()}
+          {view === 'wizard' && WizardView()}
+          {view === 'checkout' && CheckoutView()}
+          {view === 'wait_payment' && PaymentWaitView()}
+          {view === 'devices' && DevicesView()}
+          {view === 'extend_subscription' && ExtendSubscriptionView()}
+          {view === 'instruction_view' && InstructionView()}
+          {view === 'referral' && ReferralView()}
+          {view === 'referral_detail' && ReferralDetailView()}
+          {view === 'promo' && PromoView()}
+        </div>
       </div>
 
       {view !== 'checkout' && view !== 'wait_payment' && (
