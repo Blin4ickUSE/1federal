@@ -338,12 +338,12 @@ class RemnawaveAPI:
             async with self._api as api:
                 return await api.update_user(uuid, expire_at=expire_at, traffic_limit_bytes=traffic_limit_bytes, hwid_device_limit=hwid_device_limit, active_internal_squads=active_internal_squads, status=status)
         return asyncio.run(_update())
-    def create_user_with_params(self, telegram_id: int, username: str, days: int, traffic_limit_bytes: int=0, hwid_device_limit: int=None, active_internal_squads: List[str]=None):
+    def create_user_with_params(self, telegram_id: int, username: str, days: int, traffic_limit_bytes: int=0, hwid_device_limit: int=None, active_internal_squads: List[str]=None, expire_at: datetime=None):
         safe_username = sanitize_remnawave_username(username, telegram_id)
         async def _create():
             async with self._api as api:
-                expire_at = datetime.now() + timedelta(days=days)
-                return await api.create_user(safe_username, expire_at, telegram_id=telegram_id, traffic_limit_bytes=traffic_limit_bytes, hwid_device_limit=hwid_device_limit, active_internal_squads=active_internal_squads)
+                exp = expire_at or (datetime.now() + timedelta(days=days))
+                return await api.create_user(safe_username, exp, telegram_id=telegram_id, traffic_limit_bytes=traffic_limit_bytes, hwid_device_limit=hwid_device_limit, active_internal_squads=active_internal_squads)
         return asyncio.run(_create())
     def get_internal_squads(self):
         async def _get():
