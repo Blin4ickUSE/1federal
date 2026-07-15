@@ -205,12 +205,19 @@ const enrichPlanBenefit = (plan: Plan): Plan => {
   const category = plan.tariffCategory === 'family' ? 'family' : 'regular';
   const daysKey = [30, 90, 180, 365].find((d) => Math.abs(plan.days - d) <= 5) ?? plan.days;
   const benefit = PLAN_TERM_BENEFITS[category][daysKey];
-  if (!benefit || benefit.benefitPercent <= 0) return plan;
+  if (!benefit) return plan;
   return {
     ...plan,
     oldPrice: plan.oldPrice ?? benefit.oldPrice,
     benefitPercent: plan.benefitPercent ?? benefit.benefitPercent,
   };
+};
+
+/** Старая цена из таблицы (без выгоды) — всегда приоритетнее цены тарифа */
+const getPlanOldPrice = (plan: Plan): number | null => {
+  if (plan.oldPrice != null && plan.oldPrice > 0) return plan.oldPrice;
+  const enriched = enrichPlanBenefit(plan);
+  return enriched.oldPrice != null && enriched.oldPrice > 0 ? enriched.oldPrice : null;
 };
 
 interface PaymentMethodVariant {
@@ -373,11 +380,11 @@ const PRIVACY_POLICY_TEXT = `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
   { id: 'trial_7d', duration: 'Пробная подписка', price: 1, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
-  { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 499, benefitPercent: 0 },
   { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
   { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.8 },
   { id: 'reg_y1', duration: '12 месяцев', price: 4999, highlight: false, days: 365, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 5988, benefitPercent: 16.5 },
-  { id: 'fam_m1', duration: '1 месяц', price: 899, highlight: false, days: 30, tariffCategory: 'family', devicesLimit: 5 },
+  { id: 'fam_m1', duration: '1 месяц', price: 899, highlight: false, days: 30, tariffCategory: 'family', devicesLimit: 5, oldPrice: 899, benefitPercent: 0 },
   { id: 'fam_m3', duration: '3 месяца', price: 2499, highlight: false, days: 90, tariffCategory: 'family', devicesLimit: 5, oldPrice: 2697, benefitPercent: 7.3 },
   { id: 'fam_m6', duration: '6 месяцев', price: 4899, highlight: false, days: 180, tariffCategory: 'family', devicesLimit: 5, oldPrice: 5394, benefitPercent: 9.2 },
   { id: 'fam_y1', duration: '12 месяцев', price: 8999, highlight: false, days: 365, tariffCategory: 'family', devicesLimit: 5, oldPrice: 10788, benefitPercent: 16.6 },
@@ -1880,9 +1887,13 @@ export default function App() {
                 const showPromoDisc = promoDiscountPercent > 0 && plan.price > 0;
                 const eff = priceAfterPromoDiscount(plan.price);
                 const termBenefit = (plan.benefitPercent ?? 0) > 0;
-                const strikePrice = showPromoDisc
-                  ? plan.price
-                  : (termBenefit ? (plan.oldPrice ?? null) : null);
+                const displayPrice = showPromoDisc ? eff : plan.price;
+                const tableOldPrice = getPlanOldPrice(plan);
+                // При промо и при выгоде за срок зачёркнутая цена — всегда табличная «без выгоды»
+                const strikePrice =
+                  tableOldPrice != null && displayPrice < tableOldPrice
+                    ? tableOldPrice
+                    : null;
                 return (
                   <button
                     key={plan.id}
@@ -1893,12 +1904,12 @@ export default function App() {
                       <div className="text-white font-medium">{plan.duration}</div>
                       {termBenefit && (
                         <div className="text-xs text-emerald-400 mt-0.5">
-                          Выгода {formatBenefitPercent(plan.benefitPercent!)}
+                          <b>-{formatBenefitPercent(plan.benefitPercent!)}</b>
                         </div>
                       )}
                     </div>
                     <div className="text-right shrink-0">
-                      <div className="text-white font-semibold">{showPromoDisc ? eff : plan.price} ₽</div>
+                      <div className="text-white font-semibold">{displayPrice} ₽</div>
                       {strikePrice != null && (
                         <div className="text-xs text-gray-500 line-through mt-0.5">{strikePrice} ₽</div>
                       )}
@@ -1936,12 +1947,16 @@ export default function App() {
                     </span>
                     {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && (
                       <>
-                        {promoDiscountPercent > 0 && wizardPlan.price > 0 && (
-                          <div className="text-sm text-gray-500 line-through">{wizardPlan.price} ₽</div>
-                        )}
-                        {!(promoDiscountPercent > 0) && (wizardPlan.benefitPercent ?? 0) > 0 && wizardPlan.oldPrice != null && (
-                          <div className="text-sm text-gray-500 line-through">{wizardPlan.oldPrice} ₽</div>
-                        )}
+                        {(() => {
+                          const displayPrice = promoDiscountPercent > 0 && wizardPlan.price > 0
+                            ? priceAfterPromoDiscount(wizardPlan.price)
+                            : wizardPlan.price;
+                          const tableOld = getPlanOldPrice(wizardPlan);
+                          if (tableOld == null || displayPrice >= tableOld) return null;
+                          return (
+                            <div className="text-sm text-gray-500 line-through">{tableOld} ₽</div>
+                          );
+                        })()}
                         {(wizardPlan.benefitPercent ?? 0) > 0 && (
                           <div className="text-xs text-emerald-400 mt-0.5">
                             Выгода {formatBenefitPercent(wizardPlan.benefitPercent!)}
@@ -2200,9 +2215,12 @@ export default function App() {
               const extEff = priceAfterPromoDiscount(plan.price);
               const extPromo = promoDiscountPercent > 0 && plan.price > 0;
               const termBenefit = (plan.benefitPercent ?? 0) > 0;
-              const strikePrice = extPromo
-                ? plan.price
-                : (termBenefit ? (plan.oldPrice ?? null) : null);
+              const displayPrice = extPromo ? extEff : plan.price;
+              const tableOldPrice = getPlanOldPrice(plan);
+              const strikePrice =
+                tableOldPrice != null && displayPrice < tableOldPrice
+                  ? tableOldPrice
+                  : null;
               return (
               <button
                 key={plan.id}
@@ -2221,7 +2239,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <div className="text-white font-semibold">{extPromo ? extEff : plan.price} ₽</div>
+                  <div className="text-white font-semibold">{displayPrice} ₽</div>
                   {strikePrice != null && (
                     <div className="text-xs text-gray-500 mt-0.5 line-through">{strikePrice} ₽</div>
                   )}
