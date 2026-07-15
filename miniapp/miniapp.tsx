@@ -16,7 +16,7 @@ const rawEnvMini: any =
   {};
 
 const API_BASE_URL_MINI: string = rawEnvMini.VITE_API_URL || rawEnvMini.REACT_APP_API_URL || '/api';
-const SUPPORT_URL: string = rawEnvMini.VITE_SUPPORT_URL || rawEnvMini.REACT_APP_SUPPORT_URL || 'https://t.me/onefederal_support';
+const SUPPORT_URL: string = rawEnvMini.VITE_SUPPORT_URL || rawEnvMini.REACT_APP_SUPPORT_URL || 'https://t.me/onefederalbot';
 const BOT_USERNAME_MINI: string = rawEnvMini.VITE_BOT_USERNAME || rawEnvMini.REACT_APP_BOT_USERNAME || 'onefederalbot';
 const APP_NAME = '1FEDERAL VPN';
 const REFERRAL_RUB_PER_USD = 85;
@@ -1083,7 +1083,7 @@ export default function App() {
     setCheckoutAmount(amount);
     setPendingAction(action);
     setSelectedMethod(null);
-    setSelectedVariant(null);
+    setPaymentUrl(null);
     setView('checkout');
   };
 
@@ -2708,7 +2708,7 @@ export default function App() {
         {view === 'promo' && <PromoView />}
       </div>
 
-      {}
+      {view !== 'checkout' && view !== 'wait_payment' && (
       <div className="fixed bottom-0 left-0 right-0 z-20 max-w-md mx-auto px-4 pb-4 pt-2 pointer-events-none">
         <nav className="pointer-events-auto w-full rounded-full bg-zinc-900 shadow-[0_8px_32px_rgba(0,0,0,0.55)] px-2 py-2.5">
           <div ref={navGridRef} className="relative grid grid-cols-5 gap-0.5 items-stretch">
@@ -2774,6 +2774,7 @@ export default function App() {
           </div>
         </nav>
       </div>
+      )}
 
       {}
       {view === 'home' && (
