@@ -134,6 +134,7 @@ interface User {
   referrals: number;
   totalEarned: number;
   inBlacklist: boolean;
+  referralWithdrawBlocked: boolean;
 }
 
 const mapApiUser = (u: any): User => ({
@@ -161,6 +162,7 @@ const mapApiUser = (u: any): User => ({
   referrals: 0,
   totalEarned: u.total_earned ?? 0,
   inBlacklist: !!u.in_blacklist,
+  referralWithdrawBlocked: !!u.referral_withdraw_blocked,
 });
 
 const USERS_PAGE_SIZE = 50;
@@ -561,8 +563,9 @@ const UserActionModal: React.FC<UserActionModalProps> = ({ type, onClose, onConf
   };
 
   const config: ActionConfig = ({
-      'ADD_BALANCE': { title: 'Начислить баланс', label: 'Сумма (₽)', icon: ArrowUpRight, color: 'text-green-400', type: 'number' },
-      'SUB_BALANCE': { title: 'Списать баланс', label: 'Сумма (₽)', icon: ArrowDownLeft, color: 'text-red-400', type: 'number' },
+      'SET_REFERRAL_BALANCE': { title: 'Изменить реф. баланс', label: 'Новая сумма (₽)', icon: DollarSign, color: 'text-emerald-400', type: 'number' },
+      'ADD_REFERRAL_BALANCE': { title: 'Начислить реф. баланс', label: 'Сумма (₽)', icon: ArrowUpRight, color: 'text-green-400', type: 'number' },
+      'SUB_REFERRAL_BALANCE': { title: 'Списать реф. баланс', label: 'Сумма (₽)', icon: ArrowDownLeft, color: 'text-red-400', type: 'number' },
       'EXTEND_SUB': { title: 'Продлить подписку', label: 'Количество дней', icon: Clock, color: 'text-blue-400', type: 'number' },
       'REDUCE_SUB': { title: 'Уменьшить срок', label: 'Количество дней', icon: Clock, color: 'text-orange-400', type: 'number' },
       'SET_TRAFFIC': { title: 'Лимит трафика', label: 'Макс. трафик (GB)', icon: Database, color: 'text-purple-400', type: 'number' },
@@ -570,7 +573,6 @@ const UserActionModal: React.FC<UserActionModalProps> = ({ type, onClose, onConf
       'BAN': { title: 'Заблокировать', label: 'Причина бана', icon: Ban, color: 'text-red-400', type: 'text' },
       'UNBAN': { title: 'Разблокировать', label: '', icon: CheckCircle, color: 'text-green-400', type: 'text' },
       'MASS_ADD_DAYS': { title: 'Всем добавить дни', label: 'Количество дней', icon: Calendar, color: 'text-blue-500', type: 'number' },
-      'MASS_ADD_BALANCE': { title: 'Всем начислить', label: 'Сумма (₽)', icon: DollarSign, color: 'text-green-500', type: 'number' },
       'MASS_BAN': { title: 'Забанить всех', label: 'Причина', icon: Ban, color: 'text-red-500', type: 'text' },
       'MASS_UNBAN': { title: 'Разбанить всех', label: '', icon: CheckCircle, color: 'text-green-500', type: 'text' },
       'MASS_RESET_TRIAL': { title: 'Сбросить пробный период', label: '', icon: RefreshCw, color: 'text-yellow-500', type: 'text' },
@@ -955,12 +957,6 @@ const CreateKeyModal: React.FC<CreateKeyModalProps> = ({ onClose, onToast, onSuc
     );
 };
 
-interface UserDetailModalProps {
-    user: User;
-    onClose: () => void;
-    onToast: (title: string, msg: string, type: ToastType) => void;
-}
-
 interface UserSubscription {
   id: number;
   key_uuid: string;
@@ -1099,7 +1095,14 @@ const DeleteReferralsModal: React.FC<{
   );
 };
 
-const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose, onToast }) => {
+interface UserDetailModalProps {
+  user: User | null;
+  onClose: () => void;
+  onToast: (title: string, message: string, type: 'success' | 'error' | 'info') => void;
+  onUserPatch?: (userId: number, patch: Partial<User>) => void;
+}
+
+const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose, onToast, onUserPatch }) => {
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [subscriptions, setSubscriptions] = useState<UserSubscription[]>([]);
   const [loadingSubs, setLoadingSubs] = useState(true);
@@ -1107,6 +1110,17 @@ const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose, onToas
   const [referralsCount, setReferralsCount] = useState(0);
   const [showDeleteReferrals, setShowDeleteReferrals] = useState(false);
   const [addingSub, setAddingSub] = useState(false);
+  const [partnerBalance, setPartnerBalance] = useState(user?.partnerBalance ?? 0);
+  const [withdrawBlocked, setWithdrawBlocked] = useState(user?.referralWithdrawBlocked ?? false);
+  const [referralBalanceInput, setReferralBalanceInput] = useState(String(user?.partnerBalance ?? 0));
+  const [savingReferral, setSavingReferral] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+    setPartnerBalance(user.partnerBalance);
+    setWithdrawBlocked(user.referralWithdrawBlocked);
+    setReferralBalanceInput(String(user.partnerBalance));
+  }, [user]);
 
   const reloadSubscriptions = async () => {
     try {
@@ -1150,16 +1164,65 @@ const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose, onToas
   const handleAction = (type: string) => setActiveAction(type);
   const confirmAction = async (value: string, notify: boolean) => {
       try {
-        await apiFetch(`/panel/users/${user.id}/action`, {
+        const res = await apiFetch(`/panel/users/${user.id}/action`, {
           method: 'POST',
           body: JSON.stringify({ action: activeAction, value, notify, subscription_id: selectedSubId })
         });
+        if (typeof res?.partner_balance === 'number') {
+          setPartnerBalance(res.partner_balance);
+          setReferralBalanceInput(String(res.partner_balance));
+          onUserPatch?.(user.id, { partnerBalance: res.partner_balance });
+        }
+        if (typeof res?.referral_withdraw_blocked === 'boolean') {
+          setWithdrawBlocked(res.referral_withdraw_blocked);
+          onUserPatch?.(user.id, { referralWithdrawBlocked: res.referral_withdraw_blocked });
+        }
         onToast('Успешно', `Действие выполнено`, 'success');
         await reloadSubscriptions();
       } catch (e) {
         onToast('Ошибка', 'Не удалось выполнить действие', 'error');
       }
       setActiveAction(null);
+  };
+
+  const saveReferralBalance = async () => {
+    const amount = Number(referralBalanceInput);
+    if (!Number.isFinite(amount) || amount < 0) {
+      onToast('Ошибка', 'Укажите корректную сумму', 'error');
+      return;
+    }
+    setSavingReferral(true);
+    try {
+      const res = await apiFetch(`/panel/users/${user.id}/action`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'SET_REFERRAL_BALANCE', value: String(amount), notify: false }),
+      });
+      const next = typeof res?.partner_balance === 'number' ? res.partner_balance : amount;
+      setPartnerBalance(next);
+      setReferralBalanceInput(String(next));
+      onUserPatch?.(user.id, { partnerBalance: next });
+      onToast('Успешно', 'Реферальный баланс обновлён', 'success');
+    } catch (e: any) {
+      onToast('Ошибка', e?.message || 'Не удалось изменить реферальный баланс', 'error');
+    } finally {
+      setSavingReferral(false);
+    }
+  };
+
+  const toggleReferralWithdrawBlock = async () => {
+    const action = withdrawBlocked ? 'UNBLOCK_REFERRAL_WITHDRAW' : 'BLOCK_REFERRAL_WITHDRAW';
+    try {
+      const res = await apiFetch(`/panel/users/${user.id}/action`, {
+        method: 'POST',
+        body: JSON.stringify({ action, value: '', notify: true }),
+      });
+      const next = typeof res?.referral_withdraw_blocked === 'boolean' ? res.referral_withdraw_blocked : !withdrawBlocked;
+      setWithdrawBlocked(next);
+      onUserPatch?.(user.id, { referralWithdrawBlocked: next });
+      onToast('Успешно', next ? 'Вывод заблокирован' : 'Вывод разрешён', 'success');
+    } catch (e: any) {
+      onToast('Ошибка', e?.message || 'Не удалось изменить блокировку вывода', 'error');
+    }
   };
 
   const handleNotify = async () => {
@@ -1240,9 +1303,57 @@ const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose, onToas
                 <div className="space-y-6">
                     {}
                     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                        <div className="flex justify-between items-start mb-4"><h3 className="text-lg font-bold text-gray-200 flex items-center"><DollarSign size={18} className="mr-2 text-green-400"/> Баланс</h3><div className="text-xs bg-gray-950 border border-gray-800 rounded-lg p-2 min-w-[120px]"><div className="text-gray-500 mb-1 font-semibold text-[10px] uppercase">Автоплатёж</div><div className="space-y-1"><div className="flex justify-between"><span className="text-gray-400">СБП</span><span className={user.autoPayDetails?.sbp ? "text-green-400" : "text-gray-600"}>{user.autoPayDetails?.sbp ? 'Да' : 'Нет'}</span></div><div className="flex justify-between"><span className="text-gray-400">Card</span><span className={user.autoPayDetails?.card ? "text-green-400" : "text-gray-600"}>{user.autoPayDetails?.card ? 'Да' : 'Нет'}</span></div></div></div></div>
-                        <div className="text-3xl font-bold text-white mb-4">{user.balance} ₽</div>
-                        <div className="grid grid-cols-2 gap-3"><button onClick={() => handleAction('ADD_BALANCE')} className="bg-green-600/10 hover:bg-green-600/20 text-green-400 border border-green-600/20 py-2 rounded-lg text-sm font-medium transition-colors flex justify-center items-center"><ArrowUpRight size={14} className="mr-2"/> Начислить</button><button onClick={() => handleAction('SUB_BALANCE')} className="bg-red-600/10 hover:bg-red-600/20 text-red-400 border border-red-600/20 py-2 rounded-lg text-sm font-medium transition-colors flex justify-center items-center"><ArrowDownLeft size={14} className="mr-2"/> Списать</button></div>
+                        <div className="flex justify-between items-start mb-4">
+                          <h3 className="text-lg font-bold text-gray-200 flex items-center">
+                            <DollarSign size={18} className="mr-2 text-emerald-400"/> Реферальный баланс
+                          </h3>
+                          {withdrawBlocked && (
+                            <span className="text-[10px] uppercase tracking-wide bg-red-500/15 text-red-400 border border-red-500/30 px-2 py-0.5 rounded-full">
+                              Вывод заблокирован
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-3xl font-bold text-white mb-4">{partnerBalance} ₽</div>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-xs text-gray-500 block mb-1.5">Изменить сумму (₽)</label>
+                            <div className="flex gap-2">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={referralBalanceInput}
+                                onChange={(e) => setReferralBalanceInput(e.target.value)}
+                                className="flex-1 bg-gray-950 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 font-mono outline-none focus:ring-1 focus:ring-emerald-500"
+                              />
+                              <button
+                                onClick={saveReferralBalance}
+                                disabled={savingReferral}
+                                className="px-4 py-2 bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-400 border border-emerald-600/30 rounded-lg text-sm font-medium disabled:opacity-50"
+                              >
+                                {savingReferral ? '...' : 'Сохранить'}
+                              </button>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <button onClick={() => handleAction('ADD_REFERRAL_BALANCE')} className="bg-green-600/10 hover:bg-green-600/20 text-green-400 border border-green-600/20 py-2 rounded-lg text-sm font-medium transition-colors flex justify-center items-center">
+                              <ArrowUpRight size={14} className="mr-2"/> Начислить
+                            </button>
+                            <button onClick={() => handleAction('SUB_REFERRAL_BALANCE')} className="bg-red-600/10 hover:bg-red-600/20 text-red-400 border border-red-600/20 py-2 rounded-lg text-sm font-medium transition-colors flex justify-center items-center">
+                              <ArrowDownLeft size={14} className="mr-2"/> Списать
+                            </button>
+                          </div>
+                          <button
+                            onClick={toggleReferralWithdrawBlock}
+                            className={`w-full py-2.5 rounded-lg text-sm font-medium transition-colors border ${
+                              withdrawBlocked
+                                ? 'bg-green-600/10 hover:bg-green-600/20 text-green-400 border-green-600/20'
+                                : 'bg-red-600/10 hover:bg-red-600/20 text-red-400 border-red-600/20'
+                            }`}
+                          >
+                            {withdrawBlocked ? 'Разрешить вывод' : 'Заблокировать вывод'}
+                          </button>
+                        </div>
                     </div>
                     {}
                     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
@@ -1321,12 +1432,12 @@ const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose, onToas
                             <h3 className="text-lg font-bold text-gray-200 flex items-center mb-4"><Users size={18} className="mr-2 text-indigo-400"/> Партнёрская программа</h3>
                             <div className="grid grid-cols-2 gap-4 mb-4">
                                 <div className="bg-gray-950 p-3 rounded-xl border border-gray-800">
-                                    <div className="text-xs text-gray-500">Баланс</div>
-                                    <div className="text-xl font-bold text-white">{user.partnerBalance} ₽</div>
+                                    <div className="text-xs text-gray-500">Реф. баланс</div>
+                                    <div className="text-xl font-bold text-white">{partnerBalance} ₽</div>
                                 </div>
                                 <div className="bg-gray-950 p-3 rounded-xl border border-gray-800">
                                     <div className="text-xs text-gray-500">Рефералов</div>
-                                    <div className="text-xl font-bold text-white">{user.referrals}</div>
+                                    <div className="text-xl font-bold text-white">{referralsCount}</div>
                                 </div>
                             </div>
                             <div className="space-y-3">
@@ -1801,7 +1912,16 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
       <ToastContainer toasts={toasts} removeToast={(id) => setToasts(prev => prev.filter(t => t.id !== id))} />
 
       {selectedTransaction && (<TransactionModal transaction={selectedTransaction} onClose={() => setSelectedTransaction(null)} />)}
-      {selectedUser && (<UserDetailModal user={selectedUser} onClose={() => setSelectedUser(null)} onToast={addToast} />)}
+      {selectedUser && (
+        <UserDetailModal
+          user={selectedUser}
+          onClose={() => setSelectedUser(null)}
+          onToast={addToast}
+          onUserPatch={(id, patch) => {
+            setSelectedUser((prev) => (prev && prev.id === id ? { ...prev, ...patch } : prev));
+          }}
+        />
+      )}
       {isCreateKeyOpen && (<CreateKeyModal onClose={() => setIsCreateKeyOpen(false)} onToast={addToast} onSuccess={refetchKeys} />)}
       {editingKey && (<KeyEditModal keyItem={editingKey} onClose={() => setEditingKey(null)} onSave={handleUpdateKey} onDelete={handleDeleteKey} />)}
       {massActionType && <UserActionModal type={massActionType} onClose={() => setMassActionType(null)} onConfirm={async (val, notify) => {
@@ -2290,9 +2410,6 @@ const UsersPage: React.FC<UsersPageProps> = ({ userSearch, setUserSearch, setSel
                             <button onClick={() => { setMassActionType('MASS_ADD_DAYS'); setShowMassMenu(false); }} className="w-full text-left px-4 py-3 text-sm text-gray-200 hover:bg-gray-800 flex items-center border-b border-gray-800">
                                 <Calendar size={16} className="mr-2 text-blue-400" /> Добавить дни всем
                             </button>
-                            <button onClick={() => { setMassActionType('MASS_ADD_BALANCE'); setShowMassMenu(false); }} className="w-full text-left px-4 py-3 text-sm text-gray-200 hover:bg-gray-800 flex items-center border-b border-gray-800">
-                                <DollarSign size={16} className="mr-2 text-green-400" /> Начислить баланс всем
-                            </button>
                             <button onClick={() => { setMassActionType('MASS_BAN'); setShowMassMenu(false); }} className="w-full text-left px-4 py-3 text-sm text-gray-200 hover:bg-gray-800 flex items-center border-b border-gray-800">
                                 <Ban size={16} className="mr-2 text-red-400" /> Забанить всех
                             </button>
@@ -2362,7 +2479,7 @@ const UsersPage: React.FC<UsersPageProps> = ({ userSearch, setUserSearch, setSel
             <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden shadow-sm">
                 <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse">
-                        <thead><tr className="bg-gray-800/50 text-gray-400 text-xs uppercase tracking-wider"><th className="px-6 py-4">Пользователь</th><th className="px-6 py-4">Баланс</th><th className="px-6 py-4">Подписка</th><th className="px-6 py-4">Партнер</th><th className="px-6 py-4 text-right">Действие</th></tr></thead>
+                        <thead><tr className="bg-gray-800/50 text-gray-400 text-xs uppercase tracking-wider"><th className="px-6 py-4">Пользователь</th><th className="px-6 py-4">Реф. баланс</th><th className="px-6 py-4">Подписка</th><th className="px-6 py-4">Партнер</th><th className="px-6 py-4 text-right">Действие</th></tr></thead>
                         <tbody className="divide-y divide-gray-800">
                             {!loadingUsers && filteredUsers.length === 0 && (
                                 <tr><td colSpan={5} className="px-6 py-8 text-center text-gray-500">Пользователи не найдены</td></tr>
@@ -2370,7 +2487,12 @@ const UsersPage: React.FC<UsersPageProps> = ({ userSearch, setUserSearch, setSel
                             {filteredUsers.map((user) => (
                                 <tr key={user.id} onClick={() => setSelectedUser(user)} className="hover:bg-gray-800/30 cursor-pointer group">
                                     <td className="px-6 py-4 text-sm font-medium text-white flex items-center"><div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center mr-3 text-xs font-bold text-gray-300">{user.username.substring(0, 2).toUpperCase()}</div>{user.username}</td>
-                                    <td className="px-6 py-4 text-sm text-white font-bold">{user.balance} ₽</td>
+                                    <td className="px-6 py-4 text-sm text-white font-bold">
+                                      {user.partnerBalance} ₽
+                                      {user.referralWithdrawBlocked && (
+                                        <span className="ml-2 text-[10px] text-red-400 font-normal">вывод off</span>
+                                      )}
+                                    </td>
                                     <td className="px-6 py-4 text-sm text-gray-400">{user.paidUntil}</td>
                                     <td className="px-6 py-4 text-sm">{user.isPartner ? <span className="text-indigo-400 bg-indigo-400/10 px-2 py-0.5 rounded text-xs border border-indigo-400/20">Да</span> : <span className="text-gray-600">-</span>}</td>
                                     <td className="px-6 py-4 text-right"><button className="text-gray-500 hover:text-white p-2 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors"><Settings size={16} /></button></td>
@@ -2556,7 +2678,6 @@ const MailingPage: React.FC<MailingPageProps> = ({ onToast }) => {
         { value: 'external_link', label: 'Сторонняя ссылка' },
         { value: 'open_miniapp', label: 'Открыть мини-приложение' },
         { value: 'activate_promo', label: 'Активировать промокод' },
-        { value: 'add_balance', label: 'Добавить баланс' },
     ];
 
     return (

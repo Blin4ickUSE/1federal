@@ -690,6 +690,7 @@ export default function App() {
   const [banReason, setBanReason] = useState<string>('');
 
   const [referrals, setReferrals] = useState({ count: 0, balance: 0 });
+  const [referralWithdrawBlocked, setReferralWithdrawBlocked] = useState(false);
   const [referralList, setReferralList] = useState<ReferralUser[]>([]);
   const [selectedReferral, setSelectedReferral] = useState<ReferralUser | null>(null);
   const [withdrawModalOpen, setWithdrawModalOpen] = useState(false);
@@ -813,6 +814,7 @@ export default function App() {
         count: userData.referrals_count || 0,
         balance: userData.referral_balance ?? userData.partner_balance ?? 0,
       });
+      setReferralWithdrawBlocked(!!userData.referral_withdraw_blocked);
       const disc0 = Number(userData.promo_discount_percent);
       setPromoDiscountPercent(Number.isFinite(disc0) && disc0 > 0 ? disc0 : 0);
       const pend0 = userData.pending_promo_days;
@@ -1286,6 +1288,7 @@ export default function App() {
           count: userData.referrals_count || 0,
           balance: userData.referral_balance ?? userData.partner_balance ?? userData.referral_earned ?? 0,
         });
+        setReferralWithdrawBlocked(!!userData.referral_withdraw_blocked);
         return { balance: newBalance };
       }
       return null;
@@ -1657,6 +1660,10 @@ export default function App() {
 
   const submitReferralWithdraw = async () => {
     if (!telegramId) return;
+    if (referralWithdrawBlocked) {
+      alert('Вывод с реферального баланса заблокирован');
+      return;
+    }
     const amount = Math.round(Number(withdrawAmount) * 100) / 100;
     if (!Number.isFinite(amount) || amount < MIN_REFERRAL_WITHDRAW_RUB) {
       alert(`Минимальная сумма вывода — ${MIN_REFERRAL_WITHDRAW_RUB}₽`);
@@ -2576,15 +2583,15 @@ export default function App() {
         </div>
 
         <button
-          onClick={() => referrals.balance > 0 && setWithdrawModalOpen(true)}
-          disabled={referrals.balance <= 0}
+          onClick={() => !referralWithdrawBlocked && referrals.balance > 0 && setWithdrawModalOpen(true)}
+          disabled={referralWithdrawBlocked || referrals.balance <= 0}
           className={`w-full py-3.5 rounded-2xl text-white font-semibold transition-colors ${
-            referrals.balance > 0
+            !referralWithdrawBlocked && referrals.balance > 0
               ? 'bg-blue-500 hover:bg-blue-600'
               : 'bg-gray-600 cursor-not-allowed opacity-50'
           }`}
         >
-          Вывод средств
+          {referralWithdrawBlocked ? 'Вывод заблокирован' : 'Вывод средств'}
         </button>
 
         <div className="bg-white/5 rounded-2xl p-4 border border-white/10">

@@ -444,7 +444,25 @@ def get_user_info():
     if ban_status.get('banned'):
         return (jsonify({'banned': True, 'reason': ban_status.get('reason', 'Аккаунт заблокирован'), 'blacklisted': ban_status.get('blacklisted', False)}), 403)
     stats = core.get_referral_stats(user['id'])
-    return jsonify({'id': user['id'], 'telegram_id': user['telegram_id'], 'username': user.get('username'), 'full_name': user.get('full_name'), 'balance': user.get('balance', 0), 'status': user.get('status', 'Trial'), 'referral_code': user.get('referral_code'), 'partner_balance': stats.get('partner_balance', 0), 'referral_balance': stats.get('partner_balance', 0), 'referrals_count': stats.get('referrals_count', 0), 'referral_earned': stats.get('partner_balance', 0), 'referral_rate': stats.get('rate', 20), 'is_new_user': is_new_user, 'trial_used': user.get('trial_used', 0), 'promo_discount_percent': user.get('promo_discount_percent'), 'pending_promo_days': user.get('pending_promo_days')})
+    return jsonify({
+        'id': user['id'],
+        'telegram_id': user['telegram_id'],
+        'username': user.get('username'),
+        'full_name': user.get('full_name'),
+        'balance': user.get('balance', 0),
+        'status': user.get('status', 'Trial'),
+        'referral_code': user.get('referral_code'),
+        'partner_balance': stats.get('partner_balance', 0),
+        'referral_balance': stats.get('partner_balance', 0),
+        'referrals_count': stats.get('referrals_count', 0),
+        'referral_earned': stats.get('partner_balance', 0),
+        'referral_rate': stats.get('rate', 20),
+        'referral_withdraw_blocked': bool(user.get('referral_withdraw_blocked')),
+        'is_new_user': is_new_user,
+        'trial_used': user.get('trial_used', 0),
+        'promo_discount_percent': user.get('promo_discount_percent'),
+        'pending_promo_days': user.get('pending_promo_days'),
+    })
 
 @app.route('/api/payment/create', methods=['POST'])
 
@@ -1777,6 +1795,8 @@ def request_withdrawal():
     ban_status = abuse_detected.check_user_ban_status(user['id'], telegram_id)
     if ban_status.get('banned'):
         return (jsonify({'error': 'Аккаунт заблокирован'}), 403)
+    if database.is_referral_withdraw_blocked(user['id']):
+        return (jsonify({'error': 'Вывод с реферального баланса заблокирован'}), 403)
     partner_balance = float(user.get('partner_balance', 0) or 0)
     if amount > partner_balance:
         return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
@@ -2598,6 +2618,8 @@ def mass_user_action():
     value = data.get('value', '')
     notify = data.get('notify', False)
     user_ids = data.get('user_ids', [])
+    if action_type == 'MASS_ADD_BALANCE':
+        return (jsonify({'error': 'Система баланса отключена'}), 400)
     conn = database.get_db_connection()
     cursor = conn.cursor()
     try:
@@ -2612,14 +2634,7 @@ def mass_user_action():
         for user in users:
             user_id = user['id']
             telegram_id = user['telegram_id']
-            if action_type == 'MASS_ADD_BALANCE':
-                amount = float(value)
-                cursor.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (amount, user_id))
-                cursor.execute("\n                    INSERT INTO transactions (user_id, amount, type, status, description)\n                    VALUES (?, ?, 'deposit', 'Success', 'Начисление от администрации')\n                ", (user_id, amount))
-                if notify:
-                    notifications.append((telegram_id, f'💰 Вам начислено {amount} ₽ на баланс!'))
-                affected += 1
-            elif action_type == 'MASS_ADD_DAYS':
+            if action_type == 'MASS_ADD_DAYS':
                 days = int(value)
                 cursor.execute("\n                    UPDATE vpn_keys SET expiry_date = datetime(\n                        CASE WHEN expiry_date > datetime('now') THEN expiry_date ELSE datetime('now') END,\n                        '+' || ? || ' days'\n                    ) WHERE user_id = ?\n                ", (days, user_id))
                 if notify:
@@ -2692,22 +2707,93 @@ def single_user_action(user_id):
     conn = database.get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('SELECT telegram_id, balance FROM users WHERE id = ?', (user_id,))
+        cursor.execute('SELECT telegram_id, balance, partner_balance, COALESCE(referral_withdraw_blocked, 0) AS referral_withdraw_blocked FROM users WHERE id = ?', (user_id,))
         user = cursor.fetchone()
         if not user:
             return (jsonify({'error': 'User not found'}), 404)
         telegram_id = user['telegram_id']
         notification_msg = None
-        if action_type == 'ADD_BALANCE':
-            amount = float(value)
-            cursor.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (amount, user_id))
-            cursor.execute("\n                INSERT INTO transactions (user_id, amount, type, status, description)\n                VALUES (?, ?, 'deposit', 'Success', 'Начисление от администрации')\n            ", (user_id, amount))
-            notification_msg = f'💰 Вам начислено {amount} ₽ на баланс!'
-        elif action_type == 'SUB_BALANCE':
-            amount = float(value)
-            cursor.execute('UPDATE users SET balance = balance - ? WHERE id = ?', (amount, user_id))
-            cursor.execute("\n                INSERT INTO transactions (user_id, amount, type, status, description)\n                VALUES (?, ?, 'withdrawal', 'Success', 'Списание администрацией')\n            ", (user_id, -amount))
-            notification_msg = f'💸 С вашего баланса списано {amount} ₽'
+        result_extra = {}
+        if action_type in ('ADD_BALANCE', 'SUB_BALANCE'):
+            return (jsonify({'error': 'Система баланса отключена. Используйте реферальный баланс.'}), 400)
+        elif action_type == 'SET_REFERRAL_BALANCE':
+            amount = round(float(value), 2)
+            if amount < 0:
+                return (jsonify({'error': 'Сумма не может быть отрицательной'}), 400)
+            old_balance = float(user['partner_balance'] or 0)
+            cursor.execute(
+                'UPDATE users SET partner_balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (amount, user_id),
+            )
+            delta = round(amount - old_balance, 2)
+            if delta != 0:
+                cursor.execute(
+                    """
+                    INSERT INTO transactions (user_id, amount, type, status, description)
+                    VALUES (?, ?, ?, 'Success', ?)
+                    """,
+                    (
+                        user_id,
+                        delta,
+                        'referral_income' if delta > 0 else 'withdrawal',
+                        'Изменение реферального баланса администрацией',
+                    ),
+                )
+            notification_msg = f'💰 Ваш реферальный баланс установлен: {amount} ₽'
+            result_extra['partner_balance'] = amount
+        elif action_type == 'ADD_REFERRAL_BALANCE':
+            amount = round(float(value), 2)
+            if amount <= 0:
+                return (jsonify({'error': 'Сумма должна быть больше 0'}), 400)
+            cursor.execute(
+                'UPDATE users SET partner_balance = COALESCE(partner_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (amount, user_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO transactions (user_id, amount, type, status, description)
+                VALUES (?, ?, 'referral_income', 'Success', 'Начисление на реферальный баланс от администрации')
+                """,
+                (user_id, amount),
+            )
+            cursor.execute('SELECT partner_balance FROM users WHERE id = ?', (user_id,))
+            new_bal = float(cursor.fetchone()['partner_balance'] or 0)
+            notification_msg = f'💰 Вам начислено {amount} ₽ на реферальный баланс!'
+            result_extra['partner_balance'] = new_bal
+        elif action_type == 'SUB_REFERRAL_BALANCE':
+            amount = round(float(value), 2)
+            if amount <= 0:
+                return (jsonify({'error': 'Сумма должна быть больше 0'}), 400)
+            current = float(user['partner_balance'] or 0)
+            if amount > current:
+                return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
+            cursor.execute(
+                'UPDATE users SET partner_balance = partner_balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (amount, user_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO transactions (user_id, amount, type, status, description)
+                VALUES (?, ?, 'withdrawal', 'Success', 'Списание с реферального баланса администрацией')
+                """,
+                (user_id, -amount),
+            )
+            notification_msg = f'💸 С реферального баланса списано {amount} ₽'
+            result_extra['partner_balance'] = round(current - amount, 2)
+        elif action_type == 'BLOCK_REFERRAL_WITHDRAW':
+            cursor.execute(
+                'UPDATE users SET referral_withdraw_blocked = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (user_id,),
+            )
+            notification_msg = '🚫 Вывод с реферального баланса заблокирован администрацией'
+            result_extra['referral_withdraw_blocked'] = True
+        elif action_type == 'UNBLOCK_REFERRAL_WITHDRAW':
+            cursor.execute(
+                'UPDATE users SET referral_withdraw_blocked = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (user_id,),
+            )
+            notification_msg = '✅ Вывод с реферального баланса снова доступен'
+            result_extra['referral_withdraw_blocked'] = False
         elif action_type == 'EXTEND_SUB':
             days = int(value)
             cursor.execute("\n                UPDATE vpn_keys SET expiry_date = datetime(\n                    CASE WHEN expiry_date > datetime('now') THEN expiry_date ELSE datetime('now') END,\n                    '+' || ? || ' days'\n                ) WHERE user_id = ?\n            ", (days, user_id))
@@ -2733,6 +2819,8 @@ def single_user_action(user_id):
             notification_msg = '✅ Ваш аккаунт разблокирован!'
         elif action_type == 'NOTIFY':
             notification_msg = value
+        else:
+            return (jsonify({'error': f'Unknown action: {action_type}'}), 400)
         conn.commit()
         if notify and notification_msg:
             from threading import Thread
@@ -2748,7 +2836,7 @@ def single_user_action(user_id):
                     await bot.session.close()
                 asyncio.run(send())
             Thread(target=send_notification, daemon=True).start()
-        return jsonify({'success': True})
+        return jsonify({'success': True, **result_extra})
     except Exception as e:
         conn.rollback()
         logger.error(f'User action error: {e}')

@@ -34,6 +34,10 @@ def init_database():
             cursor.execute('ALTER TABLE users ADD COLUMN pending_promo_days INTEGER')
         except sqlite3.OperationalError:
             pass
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN referral_withdraw_blocked INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
         cursor.execute("\n            CREATE TABLE IF NOT EXISTS vpn_keys (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                key_uuid TEXT UNIQUE,\n                key_config TEXT,\n                status TEXT DEFAULT 'Active',\n                expiry_date TIMESTAMP,\n                traffic_used REAL DEFAULT 0,\n                traffic_limit REAL,\n                devices_limit INTEGER DEFAULT 1,\n                server_location TEXT,\n                hwid_hash TEXT,\n                last_used TIMESTAMP,\n                last_ip TEXT,\n                squad_uuid TEXT,\n                plan_type TEXT DEFAULT 'vpn',\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )\n        ")
         cursor.execute("\n            CREATE TABLE IF NOT EXISTS transactions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                type TEXT NOT NULL,\n                amount REAL NOT NULL,\n                status TEXT DEFAULT 'Pending',\n                payment_method TEXT,\n                payment_provider TEXT,\n                payment_id TEXT,\n                description TEXT,\n                duration_days INTEGER,\n                hash TEXT,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )\n        ")
         try:
@@ -642,6 +646,62 @@ def refund_partner_balance(user_id: int, amount: float) -> bool:
         return cursor.rowcount > 0
     except Exception as e:
         logger.error(f'Refund partner balance error: {e}')
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def set_partner_balance(user_id: int, amount: float) -> bool:
+    if amount < 0:
+        return False
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE users
+            SET partner_balance = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (round(float(amount), 2), user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f'Set partner balance error: {e}')
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def is_referral_withdraw_blocked(user_id: int) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT COALESCE(referral_withdraw_blocked, 0) AS blocked FROM users WHERE id = ?', (user_id,))
+        row = cursor.fetchone()
+        return bool(row and row['blocked'])
+    finally:
+        conn.close()
+
+def set_referral_withdraw_blocked(user_id: int, blocked: bool) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE users
+            SET referral_withdraw_blocked = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (1 if blocked else 0, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f'Set referral withdraw blocked error: {e}')
         conn.rollback()
         return False
     finally:
