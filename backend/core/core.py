@@ -144,8 +144,15 @@ def _parse_rw_expire_at(rw_obj) -> Optional[datetime]:
             return None
     return None
 
-def create_user_and_subscription(telegram_id: int, username: str, days: int, referred_by: int=None, traffic_limit: int=None, squad_uuids: list=None, plan_type: str='vpn', devices_limit: int=2, force_new: bool=False) -> Optional[Dict]:
+def create_user_and_subscription(telegram_id: int, username: str, days: int=None, referred_by: int=None, traffic_limit: int=None, squad_uuids: list=None, plan_type: str='vpn', devices_limit: int=2, force_new: bool=False, expire_at: datetime=None) -> Optional[Dict]:
     try:
+        if expire_at is None and (days is None or days <= 0):
+            logger.error('create_user_and_subscription requires days or expire_at')
+            return None
+        if expire_at is None:
+            expire_at = datetime.now() + timedelta(days=int(days))
+        if days is None or days <= 0:
+            days = max(1, int((expire_at - datetime.now()).total_seconds() // 86400) + 1)
         user_id = database.create_user(telegram_id, username, referred_by=referred_by)
         squad_plan_type = 'vpn' if plan_type in ('vpn_regular', 'vpn_family') else plan_type
         if squad_uuids is None:
@@ -155,16 +162,24 @@ def create_user_and_subscription(telegram_id: int, username: str, days: int, ref
                 logger.info(f"Auto-selected squad {best_squad['squad_name']} for {squad_plan_type} (users: {best_squad['current_users']})")
             else:
                 squad_uuids = database.get_default_squads(squad_plan_type)
-        logger.info(f'Creating subscription for {telegram_id}, plan_type={plan_type}, squads={squad_uuids}')
+                if not squad_uuids:
+                    # Fallback: any configured default for vpn / first active squad
+                    squad_uuids = database.get_default_squads('vpn')
+                    if not squad_uuids:
+                        conn = database.get_db_connection()
+                        cur = conn.cursor()
+                        try:
+                            cur.execute("SELECT squad_uuid FROM squad_configs WHERE is_active = 1 ORDER BY priority DESC, current_users ASC LIMIT 1")
+                            row = cur.fetchone()
+                            if row:
+                                squad_uuids = [row['squad_uuid']]
+                        finally:
+                            conn.close()
+        logger.info(f'Creating subscription for {telegram_id}, plan_type={plan_type}, squads={squad_uuids}, expire_at={expire_at.isoformat()}')
         remnawave_user = None
         existing_users = remnawave.remnawave_api.get_user_by_telegram_id(telegram_id)
         if not force_new and existing_users and (len(existing_users) > 0):
             remnawave_user = existing_users[0]
-            cur = _parse_rw_expire_at(remnawave_user)
-            base = datetime.now()
-            if cur and cur > base:
-                base = cur
-            expire_at = base + timedelta(days=days)
             if hasattr(remnawave_user, 'uuid'):
                 existing_uuid = remnawave_user.uuid
             elif isinstance(remnawave_user, dict):
@@ -185,14 +200,14 @@ def create_user_and_subscription(telegram_id: int, username: str, days: int, ref
             base_username = sanitize_username(username, telegram_id)
             unique_username = f'{base_username}_{timestamp}'
             try:
-                remnawave_user = remnawave.remnawave_api.create_user_with_params(telegram_id=telegram_id, username=unique_username, days=days, traffic_limit_bytes=traffic_limit or 0, hwid_device_limit=devices_limit, active_internal_squads=squad_uuids if squad_uuids else None)
+                remnawave_user = remnawave.remnawave_api.create_user_with_params(telegram_id=telegram_id, username=unique_username, days=days, traffic_limit_bytes=traffic_limit or 0, hwid_device_limit=devices_limit, active_internal_squads=squad_uuids if squad_uuids else None, expire_at=expire_at)
             except Exception as create_error:
                 error_msg = str(create_error).lower()
                 if 'already exists' in error_msg or 'a019' in error_msg:
                     import random
                     unique_username = f'{base_username}_{telegram_id}_{random.randint(1000, 9999)}'
                     logger.info(f'Username collision, trying {unique_username}')
-                    remnawave_user = remnawave.remnawave_api.create_user_with_params(telegram_id=telegram_id, username=unique_username, days=days, traffic_limit_bytes=traffic_limit or 0, hwid_device_limit=devices_limit, active_internal_squads=squad_uuids if squad_uuids else None)
+                    remnawave_user = remnawave.remnawave_api.create_user_with_params(telegram_id=telegram_id, username=unique_username, days=days, traffic_limit_bytes=traffic_limit or 0, hwid_device_limit=devices_limit, active_internal_squads=squad_uuids if squad_uuids else None, expire_at=expire_at)
                 else:
                     raise create_error
         if not remnawave_user:
@@ -234,9 +249,7 @@ def create_user_and_subscription(telegram_id: int, username: str, days: int, ref
             return None
         conn = database.get_db_connection()
         cursor = conn.cursor()
-        db_exp = _parse_rw_expire_at(remnawave_user)
-        if not db_exp:
-            db_exp = datetime.now() + timedelta(days=days)
+        db_exp = _parse_rw_expire_at(remnawave_user) or expire_at
         expiry_date = db_exp.isoformat()
         cursor.execute('SELECT id FROM vpn_keys WHERE key_uuid = ?', (user_uuid,))
         existing_key = cursor.fetchone()
