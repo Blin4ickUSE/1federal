@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import threading
+import unicodedata
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,10 @@ MAX_WITHDRAW_RUB = 5000
 MAX_USDT_MICRO = int(round(MAX_WITHDRAW_RUB / RUB_PER_USD * 10 ** USDT_DECIMALS))
 JETTON_TRANSFER_OP = 0x0F8A7EA5
 GAS_TON_NANOTONS = int(0.08 * 1_000_000_000)
+MIN_DEPLOY_NANOTONS = int(0.05 * 1_000_000_000)
+TON_MAINNET_GLOBAL_ID = -239  # -3 для тестнета
+# v4r2 (Tonkeeper "старый"/MyTonWallet) или v5r1 = W5 (дефолт нового Tonkeeper)
+TON_WALLET_VERSION = os.getenv('TON_WALLET_VERSION', 'v4r2').strip().lower()
 
 TON_MAINNET_ADDRESS_RE = re.compile(r'^(EQ|UQ)[A-Za-z0-9_-]{46}$')
 
@@ -84,13 +89,61 @@ def is_valid_ton_recipient(raw: str) -> bool:
 
 
 def get_mnemonic() -> Optional[list[str]]:
-    raw = os.getenv('TON_WALLET_MNEMONIC', '').strip()
+    raw = os.getenv('TON_WALLET_MNEMONIC', '')
     if not raw:
+        logger.error('TON_WALLET_MNEMONIC is empty')
         return None
-    words = raw.split()
-    if len(words) not in (12, 24):
+    # NFKC схлопывает NBSP и прочие юникод-пробелы в обычный space
+    raw = unicodedata.normalize('NFKC', raw).strip()
+    # снимаем кавычки, если .env был записан как KEY="a b c"
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        raw = raw[1:-1].strip()
+    # выкидываем zero-width и прочий мусор
+    raw = ''.join(c for c in raw if c.isalpha() or c.isspace())
+    words = [w.lower() for w in raw.split()]
+    if len(words) != 24:
+        logger.error('TON_WALLET_MNEMONIC: expected 24 words, got %s', len(words))
         return None
     return words
+
+
+async def _wallet_from_mnemonic(provider, mnemonics: list):
+    """V5R1 обязательно требует network_global_id, V4R2 его не принимает."""
+    from pytoniq import WalletV4R2, WalletV5R1
+    version = TON_WALLET_VERSION
+    if version not in ('v4r2', 'v4', 'v5r1', 'v5', 'w5'):
+        logger.error('TON_WALLET_VERSION=%r неизвестна, использую v4r2', version)
+        version = 'v4r2'
+    if version in ('v5r1', 'v5', 'w5'):
+        return await WalletV5R1.from_mnemonic(
+            provider, mnemonics, network_global_id=TON_MAINNET_GLOBAL_ID,
+        )
+    return await WalletV4R2.from_mnemonic(provider, mnemonics)
+
+
+async def _ensure_deployed(provider, wallet) -> Optional[str]:
+    """Разворачивает кошелёк, если он ещё uninit. None = всё хорошо."""
+    if not getattr(wallet, 'is_uninitialized', False):
+        return None
+    state = await provider.get_account_state(wallet.address)
+    if state.balance < MIN_DEPLOY_NANOTONS:
+        logger.error(
+            'TON wallet %s не развёрнут и на нём только %s nanoton — нужно минимум %s',
+            wallet.address, state.balance, MIN_DEPLOY_NANOTONS,
+        )
+        return 'TON кошелёк не настроен'
+    logger.info('TON wallet %s uninit, деплою через external', wallet.address)
+    await wallet.send_init_external()
+    for _ in range(30):
+        await asyncio.sleep(2)
+        try:
+            await wallet.get_seqno()
+            logger.info('TON wallet %s развёрнут', wallet.address)
+            return None
+        except Exception:
+            continue
+    logger.error('TON wallet %s: деплой не подтвердился за 60с', wallet.address)
+    return _safe_public_error()
 
 
 def _safe_public_error() -> str:
@@ -102,7 +155,7 @@ async def _send_usdt_async(
     usdt_micro: int,
     expected_address: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    from pytoniq import LiteBalancer, begin_cell, WalletV4R2
+    from pytoniq import LiteBalancer, begin_cell
     from pytoniq_core import Address
 
     if not isinstance(usdt_micro, int) or isinstance(usdt_micro, bool):
@@ -126,14 +179,34 @@ async def _send_usdt_async(
 
     mnemonics = get_mnemonic()
     if not mnemonics:
-        logger.error('TON USDT transfer: mnemonic missing or invalid length')
         return False, 'TON кошелёк не настроен'
+
+    try:
+        from pytoniq_core.crypto.mnemonic import mnemonic_is_valid
+        if not mnemonic_is_valid(mnemonics):
+            logger.error('TON_WALLET_MNEMONIC: 24 words parsed but checksum/wordlist check failed')
+            return False, 'TON кошелёк не настроен'
+    except ImportError:
+        pass
 
     provider = LiteBalancer.from_mainnet_config(2)
     await provider.start_up()
     try:
-        wallet = await WalletV4R2.from_mnemonic(provider, mnemonics)
+        wallet = await _wallet_from_mnemonic(provider, mnemonics)
         user_address = wallet.address
+
+        deploy_error = await _ensure_deployed(provider, wallet)
+        if deploy_error:
+            return False, deploy_error
+
+        state = await provider.get_account_state(user_address)
+        if state.balance < GAS_TON_NANOTONS:
+            logger.error(
+                'TON wallet %s: не хватает газа, баланс %s nanoton, нужно %s',
+                user_address, state.balance, GAS_TON_NANOTONS,
+            )
+            return False, _safe_public_error()
+
         destination = Address(normalized)
         if destination.wc != 0:
             return False, 'Некорректный адрес USDT-кошелька в сети TON'
