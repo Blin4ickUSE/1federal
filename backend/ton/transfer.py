@@ -188,8 +188,7 @@ async def _send_usdt_async(
     usdt_micro: int,
     expected_address: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    from pytoniq import LiteBalancer, begin_cell
-    from pytoniq.contract.wallet import WalletV4R2
+    from pytoniq import LiteBalancer, begin_cell, WalletV4R2
     from pytoniq_core import Address
 
     if not isinstance(usdt_micro, int) or isinstance(usdt_micro, bool):
@@ -219,7 +218,7 @@ async def _send_usdt_async(
     provider = LiteBalancer.from_mainnet_config(2)
     await provider.start_up()
     try:
-        wallet = await WalletV4R2.from_mnemonic(provider=provider, mnemonics=mnemonics)
+        wallet = await WalletV4R2.from_mnemonic(provider, mnemonics)
         user_address = wallet.address
         destination = Address(normalized)
         if destination.wc != 0:
