@@ -475,8 +475,58 @@ def create_payment():
     miniapp_url = os.getenv('MINIAPP_URL', '')
     return_url = f'{miniapp_url}/success' if miniapp_url else None
     failed_url = f'{miniapp_url}/failed' if miniapp_url else None
+    days = int(data.get('days') or 0)
+    recurring = bool(data.get('recurring'))
+    interval = platega.platega_api.interval_for_days(days) if days else None
+    use_recurring = method in ('platega_sbp', 'platega_recurring') and (recurring or interval is not None)
     try:
-        if method == 'platega_card':
+        if use_recurring:
+            if interval is None:
+                return (jsonify({'error': 'Рекуррент доступен только для тарифов 1 месяц и 12 месяцев'}), 400)
+            tariff_category = data.get('tariff_category') or 'regular'
+            plan_type = data.get('plan_type') or data.get('type') or ('vpn_family' if tariff_category == 'family' else 'vpn_regular')
+            devices_limit = int(data.get('devices_limit') or (5 if tariff_category == 'family' else 2))
+            action_type = data.get('action_type') or 'wizard'
+            vpn_key_id = data.get('key_id') or data.get('vpn_key_id')
+            period_label = 'год' if interval == platega.SUBSCRIPTION_INTERVAL_YEAR else 'месяц'
+            payment = platega.platega_api.create_recurring_subscription(
+                amount,
+                user_id,
+                interval=interval,
+                description=f'1FEDERAL VPN — автопродление раз в {period_label}',
+                return_url=return_url,
+                failed_url=failed_url,
+            )
+            if isinstance(payment, dict) and payment.get('ok') is False:
+                details = payment.get('details') or payment
+                provider_resp = details.get('response') if isinstance(details, dict) else None
+                msg = None
+                if isinstance(provider_resp, dict):
+                    msg = provider_resp.get('message') or provider_resp.get('error') or provider_resp.get('title')
+                if not msg:
+                    msg = payment.get('error')
+                return (jsonify({'error': msg or 'Platega error', 'provider': 'platega', 'details': provider_resp or details}), 400)
+            if payment and payment.get('ok') is True:
+                database.create_platega_subscription_record(
+                    user_id=user_id,
+                    subscription_id=payment['id'],
+                    amount=float(payment.get('amount') or amount),
+                    interval_code=interval,
+                    duration_days=days,
+                    plan_type=plan_type,
+                    tariff_category=tariff_category,
+                    devices_limit=devices_limit,
+                    action_type=action_type,
+                    vpn_key_id=int(vpn_key_id) if vpn_key_id else None,
+                )
+                return jsonify({
+                    'payment_id': payment.get('id'),
+                    'payment_url': payment.get('redirect_url'),
+                    'status': payment.get('status', 'pending'),
+                    'recurring': True,
+                    'subscription_id': payment.get('id'),
+                })
+        elif method == 'platega_card':
             payment = platega.platega_api.create_card_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
             if isinstance(payment, dict) and payment.get('ok') is False:
                 details = payment.get('details') or payment
@@ -507,6 +557,39 @@ def create_payment():
     except Exception as e:
         logger.error(f'Payment creation error for method {method}: {e}')
     return (jsonify({'error': 'Payment creation failed'}), 400)
+
+
+@app.route('/api/payment/recurring', methods=['GET'])
+
+def list_recurring_payments():
+    user_id = request.args.get('user_id', type=int)
+    if not user_id:
+        return (jsonify({'error': 'user_id required'}), 400)
+    user = database.get_user_by_id(user_id)
+    if not user:
+        return (jsonify({'error': 'User not found'}), 404)
+    items = database.get_active_platega_subscriptions_for_user(user_id)
+    return jsonify({'subscriptions': items})
+
+
+@app.route('/api/payment/recurring/<subscription_id>/cancel', methods=['POST'])
+
+def cancel_recurring_payment(subscription_id: str):
+    data = request.json or {}
+    user_id = data.get('user_id')
+    if not user_id or not subscription_id:
+        return (jsonify({'error': 'Missing required fields'}), 400)
+    user = database.get_user_by_id(user_id)
+    if not user:
+        return (jsonify({'error': 'User not found'}), 404)
+    local = database.get_platega_subscription(subscription_id)
+    if not local or int(local['user_id']) != int(user_id):
+        return (jsonify({'error': 'Subscription not found'}), 404)
+    result = platega.platega_api.cancel_subscription(subscription_id)
+    if not result.get('ok'):
+        return (jsonify({'error': result.get('error') or 'Cancel failed', 'details': result.get('response')}), 400)
+    database.update_platega_subscription(subscription_id, status='CANCELLED')
+    return jsonify({'success': True, 'subscription_id': subscription_id, 'status': 'CANCELLED'})
 
 @app.route('/api/promocode/apply', methods=['POST'])
 
@@ -794,6 +877,10 @@ def extend_subscription():
                     logger.error(f'Failed to notify referrer: {e}')
         if applied_promo_discount:
             database.clear_user_promo_discount(user_id)
+        try:
+            database.link_platega_subscription_to_vpn_key(user_id, int(key_id))
+        except Exception as e:
+            logger.error('Failed to link platega subscription on extend: %s', e)
         return jsonify({'success': True, 'key_id': key_id, 'new_expiry': new_expiry_str})
     except Exception as e:
         logger.error(f'Error extending subscription: {e}')
@@ -917,6 +1004,11 @@ def create_subscription():
                     core.send_notification_to_user(referrer_telegram_id, msg)
                 except Exception as e:
                     logger.error(f'Failed to notify referrer: {e}')
+        if result.get('key_id'):
+            try:
+                database.link_platega_subscription_to_vpn_key(user_id, int(result['key_id']))
+            except Exception as e:
+                logger.error('Failed to link platega subscription to key: %s', e)
         return jsonify({'success': True, 'subscription': result})
     if price > 0:
         database.update_user_balance(user_id, price)

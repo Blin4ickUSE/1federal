@@ -766,6 +766,8 @@ export default function App() {
 
   const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
   const [paymentStarting, setPaymentStarting] = useState(false);
+  const [recurringSubs, setRecurringSubs] = useState<any[]>([]);
+  const [cancellingRecurring, setCancellingRecurring] = useState(false);
 
   const [pendingAction, setPendingAction] = useState<{ type: string, payload: any } | null>(null);
 
@@ -884,6 +886,12 @@ export default function App() {
         setPromoSubscriptionDays(Number(pend0));
       } else {
         setPromoSubscriptionDays(null);
+      }
+      try {
+        const rec = await miniApiFetch(`/payment/recurring?user_id=${userData.id}`);
+        setRecurringSubs(Array.isArray(rec?.subscriptions) ? rec.subscriptions : []);
+      } catch (e) {
+        console.error('Failed to load recurring subscriptions', e);
       }
     }
 
@@ -1249,14 +1257,33 @@ export default function App() {
     setPendingAction(action);
     setPaymentUrl(null);
 
+    const plan: Plan | undefined = action.type === 'extend'
+      ? action.payload?.plan
+      : action.payload?.wizardPlan;
+    const days = Number(plan?.days || action.payload?.days || 0);
+    const isRecurringEligible = days === 30 || days === 365;
+
     try {
+      const body: Record<string, unknown> = {
+        user_id: currentUserId,
+        amount,
+        method: 'platega_sbp',
+      };
+      if (isRecurringEligible && plan) {
+        body.recurring = true;
+        body.days = days;
+        body.tariff_category = plan.tariffCategory || 'regular';
+        body.plan_type = plan.tariffCategory === 'family' ? 'vpn_family' : 'vpn_regular';
+        body.devices_limit = plan.devicesLimit || (plan.tariffCategory === 'family' ? 5 : 2);
+        body.action_type = action.type;
+        if (action.type === 'extend' && action.payload?.device?.id) {
+          body.key_id = action.payload.device.id;
+        }
+      }
+
       const res = await miniApiFetch('/payment/create', {
         method: 'POST',
-        body: JSON.stringify({
-          user_id: currentUserId,
-          amount,
-          method: 'platega_sbp',
-        }),
+        body: JSON.stringify(body),
       });
 
       const payUrl = res?.confirmation_url || res?.payment_url;
@@ -1405,7 +1432,43 @@ export default function App() {
     await Promise.all([
       refreshUserData(),
       refreshDevices(),
+      refreshRecurringSubs(),
     ]);
+  };
+
+  const refreshRecurringSubs = async () => {
+    const uid = userId || (await ensureUserId());
+    if (!uid) return;
+    try {
+      const res = await miniApiFetch(`/payment/recurring?user_id=${uid}`);
+      setRecurringSubs(Array.isArray(res?.subscriptions) ? res.subscriptions : []);
+    } catch (e) {
+      console.error('Failed to load recurring subscriptions', e);
+    }
+  };
+
+  const cancelRecurring = async (subscriptionId: string) => {
+    const uid = await ensureUserId();
+    if (!uid || cancellingRecurring) return;
+    if (!confirm('Отключить автопродление? Текущий период подписки сохранится до даты окончания.')) return;
+    setCancellingRecurring(true);
+    try {
+      const res = await miniApiFetch(`/payment/recurring/${subscriptionId}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ user_id: uid }),
+      });
+      if (res?.success) {
+        await refreshRecurringSubs();
+        alert('Автопродление отключено');
+      } else {
+        alert(res?.error || 'Не удалось отключить автопродление');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Ошибка при отключении автопродления');
+    } finally {
+      setCancellingRecurring(false);
+    }
   };
 
   const ensureUserId = async (): Promise<number | null> => {
@@ -1895,6 +1958,21 @@ export default function App() {
                     Настроить устройство
                   </button>
                 )}
+                {recurringSubs.filter((s: any) => s.status === 'ACTIVE' || s.status === 'PAST_DUE').map((s: any) => (
+                  <div key={s.subscription_id} className="pt-1 space-y-2">
+                    <div className="text-xs text-emerald-400/90 px-1">
+                      Автопродление включено
+                      {s.next_charge_at ? ` · след. списание ${new Date(s.next_charge_at).toLocaleDateString('ru-RU')}` : ''}
+                    </div>
+                    <button
+                      onClick={() => cancelRecurring(s.subscription_id)}
+                      disabled={cancellingRecurring}
+                      className="w-full py-2.5 text-sm font-medium bg-white/5 hover:bg-white/10 text-gray-300 rounded-xl border border-white/10 disabled:opacity-50"
+                    >
+                      {cancellingRecurring ? 'Отключаем…' : 'Отключить автопродление'}
+                    </button>
+                  </div>
+                ))}
                 {deviceNeedsRenew(subscription) && (
                   <button
                     onClick={() => openDeviceRenew(subscription)}
@@ -2047,6 +2125,9 @@ export default function App() {
                           ? priceAfterPromoDiscount(wizardPlan.price)
                           : (wizardPlan?.price ?? 0))} ₽
                     </span>
+                    {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && (wizardPlan.days === 30 || wizardPlan.days === 365) && (
+                      <div className="text-xs text-emerald-400/80 mt-1">С автопродлением через СБП</div>
+                    )}
                     {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && (
                       <>
                         {(() => {

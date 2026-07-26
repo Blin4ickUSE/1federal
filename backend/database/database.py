@@ -77,6 +77,9 @@ def init_database():
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS panel_sessions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                admin_id INTEGER NOT NULL,\n                session_token TEXT UNIQUE NOT NULL,\n                expires_at TIMESTAMP NOT NULL,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (admin_id) REFERENCES panel_admins(id)\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS panel_login_otp (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                admin_id INTEGER NOT NULL,\n                code_hash TEXT NOT NULL,\n                ip_address TEXT,\n                user_agent TEXT,\n                expires_at TIMESTAMP NOT NULL,\n                used_at TIMESTAMP,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (admin_id) REFERENCES panel_admins(id)\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS miniapp_sessions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                telegram_id INTEGER NOT NULL,\n                session_token TEXT UNIQUE NOT NULL,\n                username TEXT,\n                first_name TEXT,\n                photo_url TEXT,\n                expires_at TIMESTAMP NOT NULL,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
+        cursor.execute("\n            CREATE TABLE IF NOT EXISTS platega_subscriptions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                subscription_id TEXT UNIQUE NOT NULL,\n                status TEXT DEFAULT 'PENDING',\n                amount REAL NOT NULL,\n                interval_code INTEGER NOT NULL,\n                duration_days INTEGER NOT NULL,\n                plan_type TEXT DEFAULT 'vpn_regular',\n                tariff_category TEXT DEFAULT 'regular',\n                devices_limit INTEGER DEFAULT 2,\n                vpn_key_id INTEGER,\n                next_charge_at TIMESTAMP,\n                last_charge_at TIMESTAMP,\n                action_type TEXT DEFAULT 'wizard',\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )\n        ")
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_platega_subscriptions_user_id ON platega_subscriptions(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_platega_subscriptions_status ON platega_subscriptions(status)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_vpn_keys_user_id ON vpn_keys(user_id)')
@@ -1074,6 +1077,130 @@ def get_migration_subscription_days(user: Dict[str, Any]) -> int:
     if secs <= 0:
         return 0
     return max(1, int((secs + 86399) // 86400))
+
+
+def create_platega_subscription_record(
+    user_id: int,
+    subscription_id: str,
+    amount: float,
+    interval_code: int,
+    duration_days: int,
+    plan_type: str = 'vpn_regular',
+    tariff_category: str = 'regular',
+    devices_limit: int = 2,
+    action_type: str = 'wizard',
+    vpn_key_id: Optional[int] = None,
+) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO platega_subscriptions (
+                user_id, subscription_id, status, amount, interval_code, duration_days,
+                plan_type, tariff_category, devices_limit, vpn_key_id, action_type
+            ) VALUES (?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id, subscription_id, float(amount), int(interval_code), int(duration_days),
+                plan_type, tariff_category, int(devices_limit), vpn_key_id, action_type,
+            ),
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error('create_platega_subscription_record error: %s', e)
+        return False
+    finally:
+        conn.close()
+
+
+def get_platega_subscription(subscription_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM platega_subscriptions WHERE subscription_id = ?', (subscription_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_active_platega_subscriptions_for_user(user_id: int) -> list:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT * FROM platega_subscriptions
+            WHERE user_id = ? AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def update_platega_subscription(
+    subscription_id: str,
+    status: Optional[str] = None,
+    next_charge_at: Optional[str] = None,
+    last_charge_at: Optional[str] = None,
+    vpn_key_id: Optional[int] = None,
+) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        fields = []
+        values = []
+        if status is not None:
+            fields.append('status = ?')
+            values.append(status)
+        if next_charge_at is not None:
+            fields.append('next_charge_at = ?')
+            values.append(next_charge_at)
+        if last_charge_at is not None:
+            fields.append('last_charge_at = ?')
+            values.append(last_charge_at)
+        if vpn_key_id is not None:
+            fields.append('vpn_key_id = ?')
+            values.append(vpn_key_id)
+        if not fields:
+            return False
+        fields.append('updated_at = CURRENT_TIMESTAMP')
+        values.append(subscription_id)
+        cursor.execute(
+            f"UPDATE platega_subscriptions SET {', '.join(fields)} WHERE subscription_id = ?",
+            tuple(values),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def link_platega_subscription_to_vpn_key(user_id: int, vpn_key_id: int) -> bool:
+    """Привязать активную Platega-подписку пользователя к VPN-ключу после первой активации."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE platega_subscriptions
+            SET vpn_key_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+              AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
+              AND (vpn_key_id IS NULL OR vpn_key_id = 0)
+            """,
+            (vpn_key_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
 
 if __name__ != '__main__':
     init_database()
