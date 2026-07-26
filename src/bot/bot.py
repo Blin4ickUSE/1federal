@@ -45,41 +45,30 @@ def _public_origin() -> str:
         return api_url[:-4]
     return api_url
 
-def encrypt_subscription_for_happ(subscription_url: str):
-    import requests as req
+def encrypt_subscription_for_incy(subscription_url: str):
     try:
-        response = req.post(
-            'https://crypto.happ.su/api.php',
-            json={'url': subscription_url},
-            headers={'Content-Type': 'application/json'},
-            timeout=10,
-        )
-        if response.ok:
-            result = response.json()
-            encrypted = result.get('encrypted_link') if isinstance(result, dict) else None
-            if encrypted:
-                return encrypted
-        logger.error(f'Happ encryption failed: {response.status_code} {response.text}')
+        from backend.api import encrypt_incy_crypt1
+        return encrypt_incy_crypt1(subscription_url, name='1FEDERAL VPN')
     except Exception as e:
-        logger.error(f'Happ encryption error: {e}')
+        logger.error(f'Incy crypt1 encryption error: {e}')
     return None
 
-def build_happ_redirect_url(encrypted_link: str) -> str:
+def build_incy_redirect_url(encrypted_link: str) -> str:
     origin = _public_origin()
     if origin:
         return f'{origin}/api/redirect?url={quote(encrypted_link, safe="")}'
     return encrypted_link
 
-def migration_happ_keyboard(subscription_url: str):
-    """URL-кнопка «Добавить подписку» с Happ encrypt (как в миниаппе)."""
+def migration_incy_keyboard(subscription_url: str):
+    """URL-кнопка «Добавить подписку» с Incy crypt1 (как в миниаппе)."""
     if not subscription_url:
         return InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')]]
         )
-    encrypted = encrypt_subscription_for_happ(subscription_url)
+    encrypted = encrypt_subscription_for_incy(subscription_url)
     if encrypted:
         return InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', url=build_happ_redirect_url(encrypted))]]
+            inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', url=build_incy_redirect_url(encrypted))]]
         )
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', callback_data='migrate_add_sub')]]
@@ -208,7 +197,7 @@ async def cmd_start(message: types.Message):
                 traceback.print_exc()
                 provisioned = None
             if provisioned and provisioned.get('subscription_url'):
-                migration_kb = migration_happ_keyboard(provisioned['subscription_url'])
+                migration_kb = migration_incy_keyboard(provisioned['subscription_url'])
                 database.clear_migration_welcome(user['id'])
             else:
                 # Remnawave/squads могут быть не настроены — кнопка повторит выдачу
@@ -245,20 +234,20 @@ async def handle_migrate_add_sub(callback: CallbackQuery):
         if not provisioned or not provisioned.get('subscription_url'):
             await callback.message.answer('❌ Не удалось создать подписку. Проверьте Remnawave / squads в панели или откройте приложение.')
             return
-        encrypted = encrypt_subscription_for_happ(provisioned['subscription_url'])
+        encrypted = encrypt_subscription_for_incy(provisioned['subscription_url'])
         if not encrypted:
             rows = []
             if WEB_APP_URL:
                 rows.append([InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))])
             await callback.message.answer(
-                '✅ Подписка создана, но Happ-ссылка не собралась. Откройте приложение.',
+                '✅ Подписка создана, но Incy-ссылка не собралась. Откройте приложение.',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
             )
             database.clear_migration_welcome(user['id'])
             return
-        redirect_url = build_happ_redirect_url(encrypted)
+        redirect_url = build_incy_redirect_url(encrypted)
         await callback.message.answer(
-            '✅ Нажмите кнопку, чтобы добавить подписку в Happ.',
+            '✅ Нажмите кнопку, чтобы добавить подписку в Incy.',
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text='Добавить подписку', url=redirect_url)]]
             ),

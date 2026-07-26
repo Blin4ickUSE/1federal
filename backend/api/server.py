@@ -218,27 +218,23 @@ def require_auth(f):
 
 @app.route('/api/encrypt-link', methods=['POST'])
 
-def encrypt_link_for_happ():
-    import requests as req
+def encrypt_link_for_incy():
     data = request.get_json()
     url = data.get('url') if data else None
     if not url:
         return (jsonify({'error': 'URL is required'}), 400)
     try:
-        response = req.post('https://crypto.happ.su/api.php', json={'url': url}, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.ok:
-            result = response.json()
-            if result and result.get('encrypted_link'):
-                return jsonify({'encrypted_link': result['encrypted_link']})
-        logger.error(f'Happ encryption API failed: {response.status_code} - {response.text}')
-        return (jsonify({'error': 'Encryption failed'}), 500)
+        from backend.api import encrypt_incy_crypt1
+        name = (data.get('name') if data else None) or '1FEDERAL VPN'
+        encrypted = encrypt_incy_crypt1(url, name=name)
+        return jsonify({'encrypted_link': encrypted})
     except Exception as e:
-        logger.error(f'Happ encryption API error: {e}')
+        logger.error(f'Incy crypt1 encryption error: {e}')
         return (jsonify({'error': str(e)}), 500)
 
 @app.route('/api/redirect')
 
-def redirect_to_happ():
+def redirect_to_incy():
     from flask import Response
     url = request.args.get('url', '')
     url_js = json.dumps(url)
@@ -248,7 +244,7 @@ def redirect_to_happ():
         '<head>\n'
         '    <meta charset="UTF-8">\n'
         '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-        '    <title>Открываем Happ...</title>\n'
+        '    <title>Открываем Incy...</title>\n'
         '    <style>\n'
         '        * { margin: 0; padding: 0; box-sizing: border-box; }\n'
         '        body {\n'
@@ -313,11 +309,11 @@ def redirect_to_happ():
         '<body>\n'
         '    <div class="container">\n'
         '        <div class="spinner" id="spinner"></div>\n'
-        '        <h1 id="title">Открываем приложение...</h1>\n'
+        '        <h1 id="title">Открываем Incy...</h1>\n'
         '        <p id="subtitle">Пожалуйста, подождите</p>\n'
         '        <div class="error" id="errorBlock">\n'
         '            <p>Если приложение не открылось, нажмите кнопку:</p>\n'
-        '            <a class="btn" id="manualBtn" href="#">Открыть приложение</a>\n'
+        '            <a class="btn" id="manualBtn" href="#">Открыть Incy</a>\n'
         '        </div>\n'
         '    </div>\n'
         '    <script>\n'
@@ -867,7 +863,7 @@ def create_subscription():
             if user.get('trial_used', 0) == 1:
                 return (jsonify({'error': 'Пробный период уже использован'}), 400)
             days = int(data.get('days', 7) or 7)
-            price = float(data.get('price', 1) or 1)
+            price = 0.0
             devices_limit = int(data.get('devices_limit', 2) or 2)
             plan_type = 'vpn_regular'
             tariff_category = 'regular'

@@ -90,7 +90,7 @@ def init_database():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_miniapp_sessions_token ON miniapp_sessions(session_token)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_miniapp_sessions_telegram_id ON miniapp_sessions(telegram_id)')
         conn.commit()
-        desired_tariff_plans = [{'plan_type': 'vpn_regular', 'name': '1 месяц', 'price': 499, 'duration_days': 30, 'sort_order': 1}, {'plan_type': 'vpn_regular', 'name': '3 месяца', 'price': 1399, 'duration_days': 90, 'sort_order': 2}, {'plan_type': 'vpn_regular', 'name': '6 месяцев', 'price': 2699, 'duration_days': 180, 'sort_order': 3}, {'plan_type': 'vpn_regular', 'name': '12 месяцев', 'price': 4999, 'duration_days': 365, 'sort_order': 4}, {'plan_type': 'vpn_family', 'name': '1 месяц', 'price': 899, 'duration_days': 30, 'sort_order': 1}, {'plan_type': 'vpn_family', 'name': '3 месяца', 'price': 2499, 'duration_days': 90, 'sort_order': 2}, {'plan_type': 'vpn_family', 'name': '6 месяцев', 'price': 4899, 'duration_days': 180, 'sort_order': 3}, {'plan_type': 'vpn_family', 'name': '12 месяцев', 'price': 8999, 'duration_days': 365, 'sort_order': 4}]
+        desired_tariff_plans = [{'plan_type': 'vpn_regular', 'name': '1 месяц', 'price': 499, 'duration_days': 30, 'sort_order': 1}, {'plan_type': 'vpn_regular', 'name': '12 месяцев', 'price': 4999, 'duration_days': 365, 'sort_order': 2}, {'plan_type': 'vpn_family', 'name': '1 месяц', 'price': 899, 'duration_days': 30, 'sort_order': 1}, {'plan_type': 'vpn_family', 'name': '12 месяцев', 'price': 8999, 'duration_days': 365, 'sort_order': 2}]
         active_ids_to_keep = []
         active_type_days = set()
         for p in desired_tariff_plans:

@@ -145,7 +145,6 @@ async function miniApiFetch(path: string, options: RequestInit = {}): Promise<an
 type ViewState =
   | 'home'
   | 'wizard'
-  | 'checkout'
   | 'wait_payment'
   | 'devices'
   | 'instruction_view'
@@ -178,14 +177,10 @@ const formatBenefitPercent = (value: number) =>
 const PLAN_TERM_BENEFITS: Record<'regular' | 'family', Record<number, { oldPrice: number; benefitPercent: number }>> = {
   regular: {
     30: { oldPrice: 499, benefitPercent: 0 },
-    90: { oldPrice: 1497, benefitPercent: 6.5 },
-    180: { oldPrice: 2994, benefitPercent: 9.8 },
     365: { oldPrice: 5988, benefitPercent: 16.5 },
   },
   family: {
     30: { oldPrice: 899, benefitPercent: 0 },
-    90: { oldPrice: 2697, benefitPercent: 7.3 },
-    180: { oldPrice: 5394, benefitPercent: 9.2 },
     365: { oldPrice: 10788, benefitPercent: 16.6 },
   },
 };
@@ -194,7 +189,7 @@ const enrichPlanBenefit = (plan: Plan): Plan => {
   if (plan.isTrial || plan.price <= 0) return plan;
   if (plan.oldPrice != null && plan.benefitPercent != null) return plan;
   const category = plan.tariffCategory === 'family' ? 'family' : 'regular';
-  const daysKey = [30, 90, 180, 365].find((d) => Math.abs(plan.days - d) <= 5) ?? plan.days;
+  const daysKey = [30, 365].find((d) => Math.abs(plan.days - d) <= 5) ?? plan.days;
   const benefit = PLAN_TERM_BENEFITS[category][daysKey];
   if (!benefit) return plan;
   return {
@@ -454,14 +449,10 @@ const PRIVACY_POLICY_TEXT = `
 `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
-  { id: 'trial_7d', duration: 'Пробная подписка', price: 1, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'trial_7d', duration: 'Пробная подписка', price: 0, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
   { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 499, benefitPercent: 0 },
-  { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
-  { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.8 },
   { id: 'reg_y1', duration: '12 месяцев', price: 4999, highlight: false, days: 365, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 5988, benefitPercent: 16.5 },
   { id: 'fam_m1', duration: '1 месяц', price: 899, highlight: false, days: 30, tariffCategory: 'family', devicesLimit: 5, oldPrice: 899, benefitPercent: 0 },
-  { id: 'fam_m3', duration: '3 месяца', price: 2499, highlight: false, days: 90, tariffCategory: 'family', devicesLimit: 5, oldPrice: 2697, benefitPercent: 7.3 },
-  { id: 'fam_m6', duration: '6 месяцев', price: 4899, highlight: false, days: 180, tariffCategory: 'family', devicesLimit: 5, oldPrice: 5394, benefitPercent: 9.2 },
   { id: 'fam_y1', duration: '12 месяцев', price: 8999, highlight: false, days: 365, tariffCategory: 'family', devicesLimit: 5, oldPrice: 10788, benefitPercent: 16.6 },
 ];
 
@@ -489,10 +480,10 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
     steps: [
       {
         title: '1. Установка приложения',
-        desc: 'Установите приложение из Google Play или скачайте APK.',
+        desc: 'Установите приложение Incy из Google Play или скачайте APK.',
         actions: [
-          { label: 'Google Play', url: 'https://play.google.com/store/apps/details?id=com.happproxy', primary: true },
-          { label: 'Скачать .APK', url: 'https://github.com/Happ-proxy/happ-android/releases/latest/download/Happ.apk', primary: false }
+          { label: 'Google Play', url: 'https://play.google.com/store/apps/details?id=llc.itdev.incy', primary: true },
+          { label: 'Скачать .APK', url: 'https://github.com/INCY-DEV/incy-platforms/releases/latest/download/Incy.apk', primary: false }
         ]
       },
       {
@@ -515,9 +506,9 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
     steps: [
       {
         title: '1. Установка приложения',
-        desc: 'Установите приложение из App Store.',
+        desc: 'Установите приложение Incy из App Store.',
         actions: [
-          { label: 'App Store', url: 'https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973', primary: true }
+          { label: 'App Store', url: 'https://apps.apple.com/ru/app/incy/id6756943388', primary: true }
         ]
       },
       {
@@ -529,9 +520,9 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
       },
       {
         title: '3. Подключение',
-        desc: 'Нажмите (🔄) в приложении, выберите сервер и подключитесь.',
+        desc: 'В приложении обновите список серверов и подключитесь.',
         actions: [
-          { label: 'Подключиться!', url: 'happ://connect', primary: true }
+          { label: 'Подключиться!', url: 'incy://connect', primary: true }
         ]
       }
     ]
@@ -543,21 +534,22 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
     steps: [
       {
         title: '1. Установка',
-        desc: 'Скачайте и установите .EXE файл.',
+        desc: 'Скачайте и установите Incy для Windows.',
         actions: [
-          { label: 'Скачать .EXE', url: 'https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe', primary: true }
+          { label: 'Скачать .EXE', url: 'https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-windows-setup.exe', primary: true }
         ]
       },
       {
-        title: '2. Копирование ключа',
-        desc: 'Скопируйте ваш персональный ключ доступа.',
+        title: '2. Добавляем подписку',
+        desc: 'Нажмите кнопку ниже или скопируйте ключ и вставьте в Incy.',
         actions: [
-          { label: 'Скопировать ключ', type: 'copy_key', primary: true }
+          { label: 'Добавить подписку', type: 'trigger_add', primary: true },
+          { label: 'Скопировать ключ', type: 'copy_key', primary: false }
         ]
       },
       {
-        title: '3. Настройка',
-        desc: 'Вставьте скопированный ключ в приложение и подключитесь.'
+        title: '3. Подключение',
+        desc: 'В приложении обновите список серверов и подключитесь.'
       }
     ]
   },
@@ -568,16 +560,17 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
     steps: [
       {
         title: '1. Установка',
-        desc: 'Установите через AppStore.',
+        desc: 'Установите Incy через App Store.',
         actions: [
-          { label: 'App Store', url: 'https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973', primary: true }
+          { label: 'App Store', url: 'https://apps.apple.com/ru/app/incy/id6756943388', primary: true }
         ]
       },
       {
-        title: '2. Ключ доступа',
-        desc: 'Скопируйте ключ и вставьте его в приложении.',
+        title: '2. Добавляем подписку',
+        desc: 'Нажмите кнопку ниже или скопируйте ключ и вставьте в Incy.',
         actions: [
-          { label: 'Скопировать ключ', type: 'copy_key', primary: true }
+          { label: 'Добавить подписку', type: 'trigger_add', primary: true },
+          { label: 'Скопировать ключ', type: 'copy_key', primary: false }
         ]
       }
     ]
@@ -589,16 +582,17 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
     steps: [
       {
         title: '1. Установка',
-        desc: 'Скачайте релиз с GitHub.',
+        desc: 'Скачайте релиз Incy с GitHub.',
         actions: [
-          { label: 'GitHub Releases', url: 'https://github.com/Happ-proxy/happ-desktop/releases/', primary: true }
+          { label: 'GitHub Releases', url: 'https://github.com/INCY-DEV/incy-platforms/releases/', primary: true }
         ]
       },
       {
-        title: '2. Ключ доступа',
-        desc: 'Скопируйте ключ и вставьте его в приложении.',
+        title: '2. Добавляем подписку',
+        desc: 'Нажмите кнопку ниже или скопируйте ключ и вставьте в Incy.',
         actions: [
-          { label: 'Скопировать ключ', type: 'copy_key', primary: true }
+          { label: 'Добавить подписку', type: 'trigger_add', primary: true },
+          { label: 'Скопировать ключ', type: 'copy_key', primary: false }
         ]
       }
     ]
@@ -618,7 +612,7 @@ const INSTRUCTIONS: Record<string, PlatformData> = {
       },
       {
         title: '2. Установка на TV',
-        desc: 'Найдите "Happ" в Google Play на телевизоре и установите.'
+        desc: 'Найдите "Incy" в Google Play на телевизоре и установите.'
       },
       {
         title: '3. Синхронизация',
@@ -770,8 +764,8 @@ export default function App() {
   const [withdrawWallet, setWithdrawWallet] = useState('');
   const [withdrawing, setWithdrawing] = useState(false);
 
-  const [checkoutAmount, setCheckoutAmount] = useState(0);
   const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
+  const [paymentStarting, setPaymentStarting] = useState(false);
 
   const [pendingAction, setPendingAction] = useState<{ type: string, payload: any } | null>(null);
 
@@ -1242,12 +1236,54 @@ export default function App() {
     setView('wizard');
   };
 
-  const startCheckout = (amount: number, action: { type: string; payload: any }) => {
-    if (amount <= 0) return;
-    setCheckoutAmount(amount);
+  const startCheckout = async (amount: number, action: { type: string; payload: any }) => {
+    if (amount <= 0 || paymentStarting) return;
+
+    const currentUserId = await ensureUserId();
+    if (!currentUserId) {
+      alert('Пользователь не загружен, попробуйте позже');
+      return;
+    }
+
+    setPaymentStarting(true);
     setPendingAction(action);
     setPaymentUrl(null);
-    setView('checkout');
+
+    try {
+      const res = await miniApiFetch('/payment/create', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: currentUserId,
+          amount,
+          method: 'platega_sbp',
+        }),
+      });
+
+      const payUrl = res?.confirmation_url || res?.payment_url;
+      if (!payUrl) {
+        alert(res?.error || 'Не удалось создать платёж, попробуйте позже');
+        setPendingAction(null);
+        return;
+      }
+
+      setPaymentUrl(payUrl);
+      try {
+        if (window.Telegram?.WebApp?.openLink) {
+          window.Telegram.WebApp.openLink(payUrl);
+        } else {
+          window.open(payUrl, '_blank');
+        }
+      } catch {
+        window.open(payUrl, '_blank');
+      }
+      setView('wait_payment');
+    } catch (e) {
+      console.error(e);
+      alert('Не удалось создать платёж, попробуйте позже');
+      setPendingAction(null);
+    } finally {
+      setPaymentStarting(false);
+    }
   };
 
   const TrialPromoBanner = () => {
@@ -1489,12 +1525,12 @@ export default function App() {
     return () => clearInterval(interval);
   }, [paymentPolling, view]);
 
-  const getHappEncryptedLink = async (subscriptionUrl: string): Promise<string | null> => {
+  const getIncyEncryptedLink = async (subscriptionUrl: string): Promise<string | null> => {
     try {
       const response = await fetch('/api/encrypt-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: subscriptionUrl })
+        body: JSON.stringify({ url: subscriptionUrl, name: '1FEDERAL VPN' })
       });
 
       if (response.ok) {
@@ -1513,8 +1549,8 @@ export default function App() {
     }
   };
 
-  const openHappWithSubscription = async (deviceId?: number) => {
-    console.log('openHappWithSubscription called, deviceId:', deviceId);
+  const openIncyWithSubscription = async (deviceId?: number) => {
+    console.log('openIncyWithSubscription called, deviceId:', deviceId);
     console.log('Available devices:', devices);
     console.log('Device keys:', Array.from(deviceKeys.entries()));
 
@@ -1538,7 +1574,7 @@ export default function App() {
     }
 
     console.log('Encrypting URL:', subscriptionUrl);
-    const encryptedLink = await getHappEncryptedLink(subscriptionUrl);
+    const encryptedLink = await getIncyEncryptedLink(subscriptionUrl);
     console.log('Encrypted link:', encryptedLink);
 
     if (!encryptedLink) {
@@ -1704,8 +1740,6 @@ export default function App() {
       alert('Ошибка при активации подписки');
     }
   };
-
-  const getPaymentTotal = () => checkoutAmount;
 
   const referralLink = useMemo(() => {
     if (!telegramId) return '';
@@ -1923,7 +1957,7 @@ export default function App() {
                 className="w-full px-4 py-3.5 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 transition-colors flex items-center justify-between"
               >
                 <span className="text-white font-medium">Пробная · 7 дней</span>
-                <span className="text-white font-semibold">1 ₽</span>
+                <span className="text-white font-semibold">0 ₽</span>
               </button>
             )}
 
@@ -2037,12 +2071,16 @@ export default function App() {
             </div>
 
             <div className="space-y-4">
-                <Button onClick={wizardActivate} variant={wizardPlan?.isTrial || (wizardPlan?.price === 0) || wizardPlan?.id === 'promo_sub' ? 'trial' : 'primary'}>
-                    {wizardPlan?.id === 'promo_sub' || (wizardPlan?.price === 0 && !wizardPlan?.isTrial)
+                <Button
+                  onClick={wizardActivate}
+                  disabled={paymentStarting}
+                  variant={wizardPlan?.isTrial || (wizardPlan?.price === 0) || wizardPlan?.id === 'promo_sub' ? 'trial' : 'primary'}
+                >
+                    {paymentStarting
+                      ? 'Переходим к оплате...'
+                      : wizardPlan?.id === 'promo_sub' || wizardPlan?.isTrial || wizardPlan?.price === 0
                       ? 'Активировать бесплатно'
-                      : wizardPlan?.isTrial
-                        ? `Оплатить ${wizardPlan.price} ₽`
-                        : `Оплатить ${priceAfterPromoDiscount(wizardPlan?.price || 0)} ₽`}
+                      : `Оплатить ${priceAfterPromoDiscount(wizardPlan?.price || 0)} ₽`}
                 </Button>
             </div>
         </div>
@@ -2081,7 +2119,7 @@ export default function App() {
                                         }
                                     } else if (action.type === 'trigger_add') {
 
-                                        await openHappWithSubscription();
+                                        await openIncyWithSubscription();
                                     } else if (action.url) {
                                         window.open(action.url, '_blank');
                                     }
@@ -2317,97 +2355,21 @@ export default function App() {
           </div>
 
           <Button
-            disabled={!extendPlan || !extendingDevice}
+            disabled={!extendPlan || !extendingDevice || paymentStarting}
             onClick={() => {
               if (extendPlan && extendingDevice) {
                 extendSubscription(extendingDevice, extendPlan);
               }
             }}
           >
-            Продлить за {extendPlan ? priceAfterPromoDiscount(extendPlan.price) : 0} ₽
+            {paymentStarting
+              ? 'Переходим к оплате...'
+              : `Продлить за ${extendPlan ? priceAfterPromoDiscount(extendPlan.price) : 0} ₽`}
           </Button>
         </div>
       </div>
     );
   };
-
-  const CheckoutView = () => (
-    <div className="pb-24">
-      <Header
-        title="Оплата"
-        onBack={() => {
-          if (pendingAction?.type === 'wizard') setView('wizard');
-          else if (pendingAction?.type === 'extend') setView('extend_subscription');
-          else setView('home');
-        }}
-      />
-
-      <div className="px-4 space-y-6">
-        <div className="bg-white/5 rounded-3xl p-6 border border-white/10">
-          <div className="space-y-3">
-            <div className="flex justify-between items-center text-sm">
-              <span className="text-gray-400">К оплате:</span>
-              <span className="text-white font-semibold">{checkoutAmount} ₽</span>
-            </div>
-            <div className="flex justify-between items-center pt-3 border-t border-white/10 font-bold text-lg">
-              <span className="text-white">Итого:</span>
-              <span className="text-blue-400">{getPaymentTotal()} ₽</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white/5 rounded-2xl p-4 border border-white/10 flex items-center gap-3">
-          <span className="text-2xl">⚡</span>
-          <div>
-            <div className="font-semibold text-white">СБП</div>
-            <div className="text-xs text-gray-400 mt-0.5">Без комиссии</div>
-          </div>
-          <CheckCircle size={20} className="text-blue-400 ml-auto" />
-        </div>
-
-        <Button
-          onClick={async () => {
-            if (!userId) {
-              alert('Пользователь не загружен, попробуйте позже');
-              return;
-            }
-            try {
-              const total = getPaymentTotal();
-
-              const res = await miniApiFetch('/payment/create', {
-                method: 'POST',
-                body: JSON.stringify({
-                  user_id: userId,
-                  amount: total,
-                  method: 'platega_sbp'
-                }),
-              });
-
-              const payUrl = res.confirmation_url || res.payment_url;
-              if (payUrl) {
-                setPaymentUrl(payUrl);
-                try {
-                  if (window.Telegram?.WebApp?.openLink) {
-                    window.Telegram.WebApp.openLink(payUrl);
-                  } else {
-                    window.open(payUrl, '_blank');
-                  }
-                } catch {
-                  window.open(payUrl, '_blank');
-                }
-              }
-              setView('wait_payment');
-            } catch (e) {
-              console.error(e);
-              alert('Не удалось создать платёж, попробуйте позже');
-            }
-          }}
-        >
-          Оплатить {getPaymentTotal()} ₽
-        </Button>
-      </div>
-    </div>
-  );
 
   const PaymentWaitView = () => (
       <div className="flex flex-col items-center justify-center min-h-[80vh] text-center px-4 stagger-children">
@@ -2522,7 +2484,7 @@ export default function App() {
                           } else if (action.type === 'nav_ios') {
                             setActivePlatform('ios');
                           } else if (action.type === 'trigger_add') {
-                            await openHappWithSubscription(instructionDeviceId ?? undefined);
+                            await openIncyWithSubscription(instructionDeviceId ?? undefined);
                           } else if (action.url) {
                             window.open(action.url, '_blank');
                           }
@@ -2874,7 +2836,6 @@ export default function App() {
         <div key={view} className={`page-enter ${isFirstPageEnter ? 'page-enter--first' : ''} flex-1 flex flex-col`}>
           {view === 'home' && HomeView()}
           {view === 'wizard' && WizardView()}
-          {view === 'checkout' && CheckoutView()}
           {view === 'wait_payment' && PaymentWaitView()}
           {view === 'devices' && DevicesView()}
           {view === 'extend_subscription' && ExtendSubscriptionView()}
@@ -2885,7 +2846,7 @@ export default function App() {
         </div>
       </div>
 
-      {view !== 'checkout' && view !== 'wait_payment' && (
+      {view !== 'wait_payment' && (
       <div className="fixed bottom-0 left-0 right-0 z-20 max-w-md mx-auto px-4 pb-4 pt-2 pointer-events-none">
         <nav className="pointer-events-auto w-full rounded-full bg-zinc-900 shadow-[0_8px_32px_rgba(0,0,0,0.55)] px-2 py-2.5">
           <div ref={navGridRef} className="relative grid grid-cols-5 gap-0.5 items-stretch">
