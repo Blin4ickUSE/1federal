@@ -216,6 +216,41 @@ def require_auth(f):
     wrapper.__name__ = f.__name__
     return wrapper
 
+def _incy_crypt1_encrypt(url: str, name: str | None = None) -> str:
+    """
+    Encrypt a subscription URL into an incy://crypt1/<payload> deep link.
+    Wire format per docs.incy.cc/deep-links/:
+      base64url( iv(12) || AES-256-GCM(plaintext) || tag(16) )
+    Plaintext is compact sorted-key JSON: {"n":"...","url":"...","v":1}
+    Key is derived from the published @incy/link-encoder NPM package keymat.
+    """
+    import base64
+    import json
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    # K1 derived from @incy/link-encoder v1.0.0 keymat assets
+    # sha256(b"incy" + b"deep" + b"crypt1" + b"v2026.06" + kmA + kmB)
+    # fingerprint: b6bf708471cc90043232967660aade86a50b4e57929db2e53c5fa34db624c08c
+    KEY_HEX = 'f6d40ea0c8a8899d7c682d09ba0d4165dfe2b3dd45e6bb3e25cb233cf00c2462'
+    key = bytes.fromhex(KEY_HEX)
+
+    payload: dict = {'url': url, 'v': 1}
+    if name:
+        payload['n'] = name[:128]
+
+    # compact JSON with sorted keys (matches JS sortedCompactJson)
+    plaintext = json.dumps(payload, separators=(',', ':'), sort_keys=True, ensure_ascii=False).encode('utf-8')
+
+    iv = os.urandom(12)
+    aesgcm = AESGCM(key)
+    # AESGCM.encrypt returns ciphertext+tag concatenated
+    ct_tag = aesgcm.encrypt(iv, plaintext, None)
+
+    wire = iv + ct_tag
+    b64 = base64.urlsafe_b64encode(wire).rstrip(b'=').decode('ascii')
+    return f'incy://crypt1/{b64}'
+
+
 @app.route('/api/encrypt-link', methods=['POST'])
 
 def encrypt_link_for_incy():
@@ -224,9 +259,8 @@ def encrypt_link_for_incy():
     if not url:
         return (jsonify({'error': 'URL is required'}), 400)
     try:
-        from backend.api import encrypt_incy_crypt1
         name = (data.get('name') if data else None) or '1FEDERAL VPN'
-        encrypted = encrypt_incy_crypt1(url, name=name)
+        encrypted = _incy_crypt1_encrypt(url, name=name)
         return jsonify({'encrypted_link': encrypted})
     except Exception as e:
         logger.error(f'Incy crypt1 encryption error: {e}')
