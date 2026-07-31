@@ -233,7 +233,7 @@ def encrypt_link_for_incy():
             "process.stdout.write(link);"
         )
         result = subprocess.run(
-            ['node', '-e', node_script],
+            ['/usr/bin/node', '-e', node_script],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
