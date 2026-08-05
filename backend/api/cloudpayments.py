@@ -124,6 +124,82 @@ class CloudPaymentsAPI:
             logger.error('CP token charge error: %s', exc)
             return {'ok': False, 'error': str(exc)}
 
+    def create_order(
+        self,
+        *,
+        amount: float,
+        account_id: str,
+        invoice_id: str,
+        description: str,
+        currency: str = 'RUB',
+        email: Optional[str] = None,
+        success_url: Optional[str] = None,
+        fail_url: Optional[str] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Создать счёт CloudPayments — ссылка на orders.cloudpayments.ru."""
+        if not self.is_configured:
+            return {'ok': False, 'error': 'CloudPayments is not configured'}
+
+        payload: Dict[str, Any] = {
+            'Amount': round(float(amount), 2),
+            'Currency': currency,
+            'Description': description or 'Оплата подписки',
+            'InvoiceId': str(invoice_id),
+            'AccountId': str(account_id),
+            'RequireConfirmation': False,
+            'SendEmail': False,
+            'CultureName': 'ru-RU',
+        }
+        if email:
+            payload['Email'] = email
+        if success_url:
+            payload['SuccessRedirectUrl'] = success_url
+        if fail_url:
+            payload['FailRedirectUrl'] = fail_url
+        if json_data:
+            payload['JsonData'] = json_data
+
+        url = f'{self.api_url}/orders/create'
+        try:
+            response = requests.post(url, headers=self._headers(), json=payload, timeout=30)
+            parsed: Optional[Dict[str, Any]] = None
+            if response.content:
+                try:
+                    parsed = response.json()
+                except Exception:
+                    parsed = None
+
+            if not isinstance(parsed, dict):
+                logger.error('CP orders/create unexpected: %s', (response.text or '')[:500])
+                return {'ok': False, 'error': 'unexpected response', 'raw': response.text}
+
+            if not parsed.get('Success'):
+                msg = parsed.get('Message') or 'orders/create failed'
+                logger.error('CP orders/create failed: %s', msg)
+                return {'ok': False, 'error': msg, 'response': parsed}
+
+            model = parsed.get('Model') if isinstance(parsed.get('Model'), dict) else {}
+            pay_url = model.get('Url')
+            if not pay_url:
+                return {'ok': False, 'error': 'no payment url', 'response': parsed}
+
+            logger.info(
+                'CP order created id=%s invoice=%s amount=%s',
+                model.get('Id'), invoice_id, amount,
+            )
+            return {
+                'ok': True,
+                'order_id': str(model.get('Id') or ''),
+                'payment_url': str(pay_url),
+                'invoice_id': invoice_id,
+                'amount': round(float(amount), 2),
+                'model': model,
+            }
+        except requests.exceptions.RequestException as exc:
+            logger.error('CP orders/create error: %s', exc)
+            return {'ok': False, 'error': str(exc)}
+
     def widget_params(
         self,
         *,

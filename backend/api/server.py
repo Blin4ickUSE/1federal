@@ -512,7 +512,7 @@ def create_payment():
     if days <= 0 and not is_trial:
         return (jsonify({'error': 'Укажите срок подписки'}), 400)
 
-    # Все платные тарифы идут с автопродлением (привязка карты через виджет)
+    # Все платные тарифы — счёт CloudPayments (оплата на orders.cloudpayments.ru)
     invoice_id = f'inv_{uuid_lib.uuid4().hex[:20]}'
     description = (
         '1FEDERAL VPN — пробный период 7 дней за 1₽'
@@ -535,20 +535,40 @@ def create_payment():
     if not ok:
         return (jsonify({'error': 'Не удалось создать платёж'}), 500)
 
-    widget = cloudpayments.cloudpayments_api.widget_params(
+    miniapp_url = (os.getenv('MINIAPP_URL') or '').rstrip('/')
+    success_url = f'{miniapp_url}/?paid=1' if miniapp_url else None
+    fail_url = f'{miniapp_url}/?paid=0' if miniapp_url else None
+
+    order = cloudpayments.cloudpayments_api.create_order(
         amount=amount,
         account_id=str(user_id),
         invoice_id=invoice_id,
         description=description,
+        success_url=success_url,
+        fail_url=fail_url,
+        json_data={
+            'user_id': int(user_id),
+            'invoice_id': invoice_id,
+            'is_trial': is_trial,
+            'days': days,
+        },
     )
+    if not order.get('ok'):
+        return (jsonify({
+            'error': order.get('error') or 'CloudPayments order failed',
+            'provider': 'cloudpayments',
+            'details': order.get('response'),
+        }), 400)
+
     return jsonify({
         'payment_id': invoice_id,
         'invoice_id': invoice_id,
+        'order_id': order.get('order_id'),
+        'payment_url': order.get('payment_url'),
         'status': 'pending',
         'amount': amount,
         'recurring': True,
         'provider': 'cloudpayments',
-        'widget': widget,
         'method': method,
     })
 

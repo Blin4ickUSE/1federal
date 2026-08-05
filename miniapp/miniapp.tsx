@@ -1282,27 +1282,6 @@ export default function App() {
     const days = Number(plan?.days || action.payload?.days || 0);
     const isTrial = !!plan?.isTrial;
 
-    const loadCpScript = (): Promise<void> => new Promise((resolve, reject) => {
-      const w = window as any;
-      if (w.cp?.CloudPayments) {
-        resolve();
-        return;
-      }
-      const existing = document.querySelector('script[data-cloudpayments]');
-      if (existing) {
-        existing.addEventListener('load', () => resolve());
-        existing.addEventListener('error', () => reject(new Error('CP load failed')));
-        return;
-      }
-      const s = document.createElement('script');
-      s.src = 'https://widget.cloudpayments.ru/bundles/cloudpayments.js';
-      s.async = true;
-      s.setAttribute('data-cloudpayments', '1');
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error('CP load failed'));
-      document.head.appendChild(s);
-    });
-
     try {
       const body: Record<string, unknown> = {
         user_id: currentUserId,
@@ -1325,77 +1304,26 @@ export default function App() {
         body: JSON.stringify(body),
       });
 
-      const widget = res?.widget;
-      if (!widget) {
+      const payUrl = res?.payment_url || res?.confirmation_url;
+      if (!payUrl) {
         alert(res?.error || 'Не удалось создать платёж, попробуйте позже');
         setPendingAction(null);
         return;
       }
 
-      await loadCpScript();
+      setPaymentUrl(payUrl);
+      // Открываем оплату на сайте CloudPayments во внешнем браузере (не в миниаппе)
+      try {
+        if (window.Telegram?.WebApp?.openLink) {
+          window.Telegram.WebApp.openLink(payUrl);
+        } else {
+          window.open(payUrl, '_blank');
+        }
+      } catch {
+        window.open(payUrl, '_blank');
+      }
       setView('wait_payment');
       setPaymentPolling(true);
-
-      const w = window as any;
-      const cpWidget = new w.cp.CloudPayments();
-      const intentParams = {
-        publicTerminalId: widget.publicTerminalId || widget.publicId,
-        description: widget.description || '1FEDERAL VPN',
-        paymentSchema: 'Single',
-        currency: widget.currency || 'RUB',
-        culture: 'ru-RU',
-        amount: Number(widget.amount),
-        skin: 'modern',
-        autoClose: 3,
-        externalId: widget.externalId || widget.invoiceId,
-        userInfo: widget.userInfo || { accountId: String(currentUserId) },
-      };
-
-      const onFail = (msg?: string) => {
-        alert(msg || 'Оплата не прошла. Попробуйте ещё раз.');
-        setPendingAction(null);
-        setPaymentPolling(false);
-        setView('home');
-      };
-
-      if (typeof cpWidget.start === 'function') {
-        try {
-          const result = await cpWidget.start(intentParams);
-          const type = result?.type;
-          const status = result?.status || result?.data?.status;
-          if (type === 'cancel') {
-            onFail('Оплата отменена');
-            return;
-          }
-          if (status === 'fail' || type === 'error') {
-            onFail('Оплата не прошла');
-            return;
-          }
-          // success — ждём Pay-webhook и рост баланса
-        } catch (e: any) {
-          if (e?.type === 'cancel' || e?.message === 'cancel') {
-            onFail('Оплата отменена');
-          } else {
-            console.error(e);
-            onFail();
-          }
-        }
-      } else if (typeof cpWidget.pay === 'function') {
-        cpWidget.pay('charge', {
-          publicId: widget.publicId || widget.publicTerminalId,
-          description: widget.description || '1FEDERAL VPN',
-          amount: Number(widget.amount),
-          currency: 'RUB',
-          accountId: String(currentUserId),
-          invoiceId: widget.invoiceId || widget.externalId,
-          skin: 'modern',
-        }, {
-          onSuccess: () => { /* polling */ },
-          onFail: () => onFail(),
-        });
-      } else {
-        onFail('Платёжный виджет недоступен');
-      }
     } catch (e) {
       console.error(e);
       alert('Не удалось создать платёж, попробуйте позже');
