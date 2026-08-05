@@ -80,6 +80,54 @@ def init_database():
         cursor.execute("\n            CREATE TABLE IF NOT EXISTS platega_subscriptions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                subscription_id TEXT UNIQUE NOT NULL,\n                status TEXT DEFAULT 'PENDING',\n                amount REAL NOT NULL,\n                interval_code INTEGER NOT NULL,\n                duration_days INTEGER NOT NULL,\n                plan_type TEXT DEFAULT 'vpn_regular',\n                tariff_category TEXT DEFAULT 'regular',\n                devices_limit INTEGER DEFAULT 2,\n                vpn_key_id INTEGER,\n                next_charge_at TIMESTAMP,\n                last_charge_at TIMESTAMP,\n                action_type TEXT DEFAULT 'wizard',\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )\n        ")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_platega_subscriptions_user_id ON platega_subscriptions(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_platega_subscriptions_status ON platega_subscriptions(status)')
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS recurring_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                subscription_id TEXT UNIQUE NOT NULL,
+                status TEXT DEFAULT 'PENDING',
+                amount REAL NOT NULL,
+                duration_days INTEGER NOT NULL,
+                plan_type TEXT DEFAULT 'vpn_regular',
+                tariff_category TEXT DEFAULT 'regular',
+                devices_limit INTEGER DEFAULT 2,
+                vpn_key_id INTEGER,
+                card_token TEXT,
+                saved_method_id INTEGER,
+                next_charge_at TIMESTAMP,
+                last_charge_at TIMESTAMP,
+                retry_count INTEGER DEFAULT 0,
+                fail_notified INTEGER DEFAULT 0,
+                converts_from_trial INTEGER DEFAULT 0,
+                action_type TEXT DEFAULT 'wizard',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_subs_user ON recurring_subscriptions(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_subs_status ON recurring_subscriptions(status)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_subs_next ON recurring_subscriptions(next_charge_at)')
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payment_intents (
+                invoice_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                days INTEGER NOT NULL,
+                plan_type TEXT DEFAULT 'vpn_regular',
+                tariff_category TEXT DEFAULT 'regular',
+                devices_limit INTEGER DEFAULT 2,
+                is_trial INTEGER DEFAULT 0,
+                action_type TEXT DEFAULT 'wizard',
+                vpn_key_id INTEGER,
+                status TEXT DEFAULT 'pending',
+                payment_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_payment_intents_user ON payment_intents(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_vpn_keys_user_id ON vpn_keys(user_id)')
@@ -93,7 +141,16 @@ def init_database():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_miniapp_sessions_token ON miniapp_sessions(session_token)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_miniapp_sessions_telegram_id ON miniapp_sessions(telegram_id)')
         conn.commit()
-        desired_tariff_plans = [{'plan_type': 'vpn_regular', 'name': '1 месяц', 'price': 499, 'duration_days': 30, 'sort_order': 1}, {'plan_type': 'vpn_regular', 'name': '12 месяцев', 'price': 4999, 'duration_days': 365, 'sort_order': 2}, {'plan_type': 'vpn_family', 'name': '1 месяц', 'price': 899, 'duration_days': 30, 'sort_order': 1}, {'plan_type': 'vpn_family', 'name': '12 месяцев', 'price': 8999, 'duration_days': 365, 'sort_order': 2}]
+        desired_tariff_plans = [
+            {'plan_type': 'vpn_regular', 'name': '1 месяц', 'price': 499, 'duration_days': 30, 'sort_order': 1},
+            {'plan_type': 'vpn_regular', 'name': '3 месяца', 'price': 1399, 'duration_days': 90, 'sort_order': 2},
+            {'plan_type': 'vpn_regular', 'name': '6 месяцев', 'price': 2699, 'duration_days': 180, 'sort_order': 3},
+            {'plan_type': 'vpn_regular', 'name': '12 месяцев', 'price': 4999, 'duration_days': 365, 'sort_order': 4},
+            {'plan_type': 'vpn_family', 'name': '1 месяц', 'price': 899, 'duration_days': 30, 'sort_order': 1},
+            {'plan_type': 'vpn_family', 'name': '3 месяца', 'price': 2499, 'duration_days': 90, 'sort_order': 2},
+            {'plan_type': 'vpn_family', 'name': '6 месяцев', 'price': 4899, 'duration_days': 180, 'sort_order': 3},
+            {'plan_type': 'vpn_family', 'name': '12 месяцев', 'price': 8999, 'duration_days': 365, 'sort_order': 4},
+        ]
         active_ids_to_keep = []
         active_type_days = set()
         for p in desired_tariff_plans:
@@ -118,7 +175,7 @@ def init_database():
             cursor.execute('SELECT COUNT(*) FROM public_pages WHERE page_type = ?', (page_type,))
             if cursor.fetchone()[0] == 0:
                 cursor.execute("INSERT INTO public_pages (page_type, content) VALUES (?, '')", (page_type,))
-        for method in ['platega', 'platega_sbp', 'platega_card', 'crypto']:
+        for method in ['cloudpayments', 'crypto']:
             cursor.execute('SELECT COUNT(*) FROM payment_fees WHERE payment_method = ?', (method,))
             if cursor.fetchone()[0] == 0:
                 cursor.execute('INSERT INTO payment_fees (payment_method) VALUES (?)', (method,))
@@ -1079,15 +1136,15 @@ def get_migration_subscription_days(user: Dict[str, Any]) -> int:
     return max(1, int((secs + 86399) // 86400))
 
 
-def create_platega_subscription_record(
+def create_payment_intent(
+    invoice_id: str,
     user_id: int,
-    subscription_id: str,
     amount: float,
-    interval_code: int,
-    duration_days: int,
+    days: int,
     plan_type: str = 'vpn_regular',
     tariff_category: str = 'regular',
     devices_limit: int = 2,
+    is_trial: bool = False,
     action_type: str = 'wizard',
     vpn_key_id: Optional[int] = None,
 ) -> bool:
@@ -1096,43 +1153,179 @@ def create_platega_subscription_record(
     try:
         cursor.execute(
             """
-            INSERT INTO platega_subscriptions (
-                user_id, subscription_id, status, amount, interval_code, duration_days,
-                plan_type, tariff_category, devices_limit, vpn_key_id, action_type
-            ) VALUES (?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO payment_intents (
+                invoice_id, user_id, amount, days, plan_type, tariff_category,
+                devices_limit, is_trial, action_type, vpn_key_id, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             """,
             (
-                user_id, subscription_id, float(amount), int(interval_code), int(duration_days),
-                plan_type, tariff_category, int(devices_limit), vpn_key_id, action_type,
+                invoice_id, user_id, float(amount), int(days), plan_type, tariff_category,
+                int(devices_limit), 1 if is_trial else 0, action_type, vpn_key_id,
             ),
         )
         conn.commit()
         return True
     except Exception as e:
-        logger.error('create_platega_subscription_record error: %s', e)
+        logger.error('create_payment_intent error: %s', e)
         return False
     finally:
         conn.close()
 
 
-def get_platega_subscription(subscription_id: str) -> Optional[Dict[str, Any]]:
+def get_payment_intent(invoice_id: str) -> Optional[Dict[str, Any]]:
+    if not invoice_id:
+        return None
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('SELECT * FROM platega_subscriptions WHERE subscription_id = ?', (subscription_id,))
+        cursor.execute('SELECT * FROM payment_intents WHERE invoice_id = ?', (invoice_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
 
 
-def get_active_platega_subscriptions_for_user(user_id: int) -> list:
+def mark_payment_intent_paid(invoice_id: str, payment_id: Optional[str] = None) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
             """
-            SELECT * FROM platega_subscriptions
+            UPDATE payment_intents
+            SET status = 'paid', payment_id = COALESCE(?, payment_id), updated_at = CURRENT_TIMESTAMP
+            WHERE invoice_id = ?
+            """,
+            (payment_id, invoice_id),
+        )
+        # Also allow inserting synthetic renew invoices
+        if cursor.rowcount == 0 and payment_id:
+            pass
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def transaction_exists_by_payment_id(payment_id: str, provider: str = 'CloudPayments') -> bool:
+    if not payment_id:
+        return False
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id FROM transactions WHERE payment_id = ? AND payment_provider = ?",
+            (str(payment_id), provider),
+        )
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def insert_deposit_transaction(
+    user_id: int,
+    amount: float,
+    method_name: str,
+    payment_id: str,
+    provider: str = 'CloudPayments',
+) -> None:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO transactions (user_id, type, amount, status, payment_method, payment_provider, payment_id)
+            VALUES (?, 'deposit', ?, 'Success', ?, ?, ?)
+            """,
+            (user_id, float(amount), method_name, provider, str(payment_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_saved_payment_method(method_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM saved_payment_methods WHERE id = ?', (method_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def create_recurring_subscription(
+    user_id: int,
+    subscription_id: str,
+    amount: float,
+    duration_days: int,
+    plan_type: str = 'vpn_regular',
+    tariff_category: str = 'regular',
+    devices_limit: int = 2,
+    action_type: str = 'wizard',
+    vpn_key_id: Optional[int] = None,
+    card_token: Optional[str] = None,
+    saved_method_id: Optional[int] = None,
+    next_charge_at: Optional[str] = None,
+    last_charge_at: Optional[str] = None,
+    converts_from_trial: int = 0,
+    status: str = 'ACTIVE',
+) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Одна активная автопродление-подписка на пользователя: гасим старые
+        cursor.execute(
+            """
+            UPDATE recurring_subscriptions
+            SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
+            """,
+            (user_id,),
+        )
+        cursor.execute(
+            """
+            INSERT INTO recurring_subscriptions (
+                user_id, subscription_id, status, amount, duration_days,
+                plan_type, tariff_category, devices_limit, vpn_key_id,
+                card_token, saved_method_id, next_charge_at, last_charge_at,
+                converts_from_trial, action_type, retry_count, fail_notified
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (
+                user_id, subscription_id, status, float(amount), int(duration_days),
+                plan_type, tariff_category, int(devices_limit), vpn_key_id,
+                card_token, saved_method_id, next_charge_at, last_charge_at,
+                int(converts_from_trial), action_type,
+            ),
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error('create_recurring_subscription error: %s', e)
+        return False
+    finally:
+        conn.close()
+
+
+def get_recurring_subscription(subscription_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM recurring_subscriptions WHERE subscription_id = ?', (subscription_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_active_recurring_subscriptions_for_user(user_id: int) -> list:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT * FROM recurring_subscriptions
             WHERE user_id = ? AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
             ORDER BY created_at DESC
             """,
@@ -1143,36 +1336,54 @@ def get_active_platega_subscriptions_for_user(user_id: int) -> list:
         conn.close()
 
 
-def update_platega_subscription(
-    subscription_id: str,
-    status: Optional[str] = None,
-    next_charge_at: Optional[str] = None,
-    last_charge_at: Optional[str] = None,
-    vpn_key_id: Optional[int] = None,
-) -> bool:
+def get_due_recurring_subscriptions(limit: int = 40) -> list:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        fields = []
-        values = []
-        if status is not None:
-            fields.append('status = ?')
-            values.append(status)
-        if next_charge_at is not None:
-            fields.append('next_charge_at = ?')
-            values.append(next_charge_at)
-        if last_charge_at is not None:
-            fields.append('last_charge_at = ?')
-            values.append(last_charge_at)
-        if vpn_key_id is not None:
-            fields.append('vpn_key_id = ?')
-            values.append(vpn_key_id)
-        if not fields:
-            return False
-        fields.append('updated_at = CURRENT_TIMESTAMP')
-        values.append(subscription_id)
+        now = datetime.utcnow().replace(microsecond=0).isoformat()
         cursor.execute(
-            f"UPDATE platega_subscriptions SET {', '.join(fields)} WHERE subscription_id = ?",
+            """
+            SELECT * FROM recurring_subscriptions
+            WHERE status IN ('ACTIVE', 'PAST_DUE')
+              AND next_charge_at IS NOT NULL
+              AND next_charge_at <= ?
+            ORDER BY next_charge_at ASC
+            LIMIT ?
+            """,
+            (now, int(limit)),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def update_recurring_subscription(subscription_id: str, **kwargs) -> bool:
+    allowed = {
+        'status', 'next_charge_at', 'last_charge_at', 'vpn_key_id',
+        'card_token', 'saved_method_id', 'retry_count', 'fail_notified',
+        'converts_from_trial', 'amount', 'duration_days', 'plan_type',
+        'tariff_category', 'devices_limit',
+    }
+    # next_charge_at может быть явно None (остановить ретраи)
+    nullable = {'next_charge_at', 'vpn_key_id', 'card_token', 'saved_method_id'}
+    fields = []
+    values = []
+    for key, value in kwargs.items():
+        if key not in allowed:
+            continue
+        if value is None and key not in nullable:
+            continue
+        fields.append(f'{key} = ?')
+        values.append(value)
+    if not fields:
+        return False
+    fields.append('updated_at = CURRENT_TIMESTAMP')
+    values.append(subscription_id)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"UPDATE recurring_subscriptions SET {', '.join(fields)} WHERE subscription_id = ?",
             tuple(values),
         )
         conn.commit()
@@ -1181,14 +1392,13 @@ def update_platega_subscription(
         conn.close()
 
 
-def link_platega_subscription_to_vpn_key(user_id: int, vpn_key_id: int) -> bool:
-    """Привязать активную Platega-подписку пользователя к VPN-ключу после первой активации."""
+def link_recurring_subscription_to_vpn_key(user_id: int, vpn_key_id: int) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
             """
-            UPDATE platega_subscriptions
+            UPDATE recurring_subscriptions
             SET vpn_key_id = ?, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = ?
               AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
@@ -1200,6 +1410,29 @@ def link_platega_subscription_to_vpn_key(user_id: int, vpn_key_id: int) -> bool:
         return cursor.rowcount > 0
     finally:
         conn.close()
+
+
+# --- Legacy Platega helpers (no-op / thin wrappers for old call sites) ---
+
+def create_platega_subscription_record(*args, **kwargs) -> bool:
+    logger.warning('create_platega_subscription_record is deprecated')
+    return False
+
+
+def get_platega_subscription(subscription_id: str) -> Optional[Dict[str, Any]]:
+    return get_recurring_subscription(subscription_id)
+
+
+def get_active_platega_subscriptions_for_user(user_id: int) -> list:
+    return get_active_recurring_subscriptions_for_user(user_id)
+
+
+def update_platega_subscription(subscription_id: str, **kwargs) -> bool:
+    return update_recurring_subscription(subscription_id, **kwargs)
+
+
+def link_platega_subscription_to_vpn_key(user_id: int, vpn_key_id: int) -> bool:
+    return link_recurring_subscription_to_vpn_key(user_id, vpn_key_id)
 
 
 if __name__ != '__main__':

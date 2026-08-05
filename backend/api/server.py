@@ -13,13 +13,19 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../'))
 from backend.database import database
 from backend.core import core, abuse_detected
-from backend.api import remnawave, platega
+from backend.api import remnawave, cloudpayments
+from backend.api import recurring as recurring_billing
 from backend.core.blacklist_updater import start_blacklist_updater
 app = Flask(__name__)
 CORS(app, resources={'/api/*': {'origins': '*'}})
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-ENV_KEYS_MANAGED = {'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID', 'TELEGRAM_ADMIN_IDS', 'REMWAVE_PANEL_URL', 'REMWAVE_API_KEY', 'PLATEGA_MERCHANT_ID', 'PLATEGA_SECRET_KEY', 'PLATEGA_API_URL', 'TRIAL_HOURS'}
+ENV_KEYS_MANAGED = {
+    'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID', 'TELEGRAM_ADMIN_IDS',
+    'REMWAVE_PANEL_URL', 'REMWAVE_API_KEY',
+    'CLOUDPAYMENTS_PUBLIC_ID', 'CLOUDPAYMENTS_API_SECRET', 'CLOUDPAYMENTS_API_URL',
+    'TRIAL_HOURS',
+}
 
 def _parse_admin_ids() -> list[int]:
     raw = os.getenv('TELEGRAM_ADMIN_IDS') or os.getenv('TELEGRAM_ADMIN_ID', '')
@@ -219,26 +225,14 @@ def require_auth(f):
 @app.route('/api/encrypt-link', methods=['POST'])
 
 def encrypt_link_for_incy():
-    import subprocess
-    import shutil
     data = request.get_json()
     url = data.get('url') if data else None
     if not url:
         return (jsonify({'error': 'URL is required'}), 400)
     try:
+        from backend.api import encrypt_incy_crypt1
         name = (data.get('name') if data else None) or '1FEDERAL VPN'
-        node_script = (
-            "const { encryptLink } = require('/opt/incy-encoder/node_modules/@incy/link-encoder');"
-            f"const link = encryptLink({json.dumps(url)}, {{ name: {json.dumps(name)} }});"
-            "process.stdout.write(link);"
-        )
-        result = subprocess.run(
-            ['/usr/bin/node', '-e', node_script],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
-        encrypted = result.stdout.strip()
+        encrypted = encrypt_incy_crypt1(url, name=name)
         return jsonify({'encrypted_link': encrypted})
     except Exception as e:
         logger.error(f'Incy crypt1 encryption error: {e}')
@@ -475,100 +469,98 @@ def get_user_info():
 @app.route('/api/payment/create', methods=['POST'])
 
 def create_payment():
-    data = request.json
+    import uuid as uuid_lib
+    data = request.json or {}
     user_id = data.get('user_id')
     amount = data.get('amount')
-    method = data.get('method')
-    if not user_id or not amount or (not method):
+    method = data.get('method') or 'cloudpayments'
+    if not user_id or amount is None:
         return (jsonify({'error': 'Missing required fields'}), 400)
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return (jsonify({'error': 'Invalid amount'}), 400)
+    if amount <= 0:
+        return (jsonify({'error': 'Invalid amount'}), 400)
+
     user = database.get_user_by_id(user_id)
     if not user:
         return (jsonify({'error': 'User not found'}), 404)
-    miniapp_url = os.getenv('MINIAPP_URL', '')
-    return_url = f'{miniapp_url}/success' if miniapp_url else None
-    failed_url = f'{miniapp_url}/failed' if miniapp_url else None
+
+    if not cloudpayments.cloudpayments_api.is_configured:
+        return (jsonify({'error': 'CloudPayments не настроен'}), 503)
+
     days = int(data.get('days') or 0)
-    recurring = bool(data.get('recurring'))
-    interval = platega.platega_api.interval_for_days(days) if days else None
-    use_recurring = method in ('platega_sbp', 'platega_recurring') and (recurring or interval is not None)
-    try:
-        if use_recurring:
-            if interval is None:
-                return (jsonify({'error': 'Рекуррент доступен только для тарифов 1 месяц и 12 месяцев'}), 400)
-            tariff_category = data.get('tariff_category') or 'regular'
-            plan_type = data.get('plan_type') or data.get('type') or ('vpn_family' if tariff_category == 'family' else 'vpn_regular')
-            devices_limit = int(data.get('devices_limit') or (5 if tariff_category == 'family' else 2))
-            action_type = data.get('action_type') or 'wizard'
-            vpn_key_id = data.get('key_id') or data.get('vpn_key_id')
-            period_label = 'год' if interval == platega.SUBSCRIPTION_INTERVAL_YEAR else 'месяц'
-            payment = platega.platega_api.create_recurring_subscription(
-                amount,
-                user_id,
-                interval=interval,
-                description=f'1FEDERAL VPN — автопродление раз в {period_label}',
-                return_url=return_url,
-                failed_url=failed_url,
-            )
-            if isinstance(payment, dict) and payment.get('ok') is False:
-                details = payment.get('details') or payment
-                provider_resp = details.get('response') if isinstance(details, dict) else None
-                msg = None
-                if isinstance(provider_resp, dict):
-                    msg = provider_resp.get('message') or provider_resp.get('error') or provider_resp.get('title')
-                if not msg:
-                    msg = payment.get('error')
-                return (jsonify({'error': msg or 'Platega error', 'provider': 'platega', 'details': provider_resp or details}), 400)
-            if payment and payment.get('ok') is True:
-                database.create_platega_subscription_record(
-                    user_id=user_id,
-                    subscription_id=payment['id'],
-                    amount=float(payment.get('amount') or amount),
-                    interval_code=interval,
-                    duration_days=days,
-                    plan_type=plan_type,
-                    tariff_category=tariff_category,
-                    devices_limit=devices_limit,
-                    action_type=action_type,
-                    vpn_key_id=int(vpn_key_id) if vpn_key_id else None,
-                )
-                return jsonify({
-                    'payment_id': payment.get('id'),
-                    'payment_url': payment.get('redirect_url'),
-                    'status': payment.get('status', 'pending'),
-                    'recurring': True,
-                    'subscription_id': payment.get('id'),
-                })
-        elif method == 'platega_card':
-            payment = platega.platega_api.create_card_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
-            if isinstance(payment, dict) and payment.get('ok') is False:
-                details = payment.get('details') or payment
-                provider_resp = details.get('response') if isinstance(details, dict) else None
-                msg = None
-                if isinstance(provider_resp, dict):
-                    msg = provider_resp.get('message') or provider_resp.get('error') or provider_resp.get('title')
-                if not msg:
-                    msg = payment.get('error')
-                return (jsonify({'error': msg or 'Platega error', 'provider': 'platega', 'details': provider_resp or details}), 400)
-            if payment and payment.get('ok') is True:
-                return jsonify({'payment_id': payment.get('id'), 'payment_url': payment.get('redirect_url'), 'status': payment.get('status', 'pending')})
-        elif method == 'platega_sbp':
-            payment = platega.platega_api.create_sbp_payment(amount, user_id, return_url=return_url, failed_url=failed_url)
-            if isinstance(payment, dict) and payment.get('ok') is False:
-                details = payment.get('details') or payment
-                provider_resp = details.get('response') if isinstance(details, dict) else None
-                msg = None
-                if isinstance(provider_resp, dict):
-                    msg = provider_resp.get('message') or provider_resp.get('error') or provider_resp.get('title')
-                if not msg:
-                    msg = payment.get('error')
-                return (jsonify({'error': msg or 'Platega error', 'provider': 'platega', 'details': provider_resp or details}), 400)
-            if payment and payment.get('ok') is True:
-                return jsonify({'payment_id': payment.get('id'), 'payment_url': payment.get('redirect_url'), 'status': payment.get('status', 'pending')})
-        else:
-            return (jsonify({'error': f'Unknown payment method: {method}'}), 400)
-    except Exception as e:
-        logger.error(f'Payment creation error for method {method}: {e}')
-    return (jsonify({'error': 'Payment creation failed'}), 400)
+    is_trial = bool(data.get('is_trial'))
+    tariff_category = data.get('tariff_category') or 'regular'
+    plan_type = data.get('plan_type') or data.get('type') or (
+        'vpn_family' if tariff_category == 'family' else 'vpn_regular'
+    )
+    devices_limit = int(data.get('devices_limit') or (5 if tariff_category == 'family' else 2))
+    action_type = data.get('action_type') or 'wizard'
+    vpn_key_id = data.get('key_id') or data.get('vpn_key_id')
+
+    if is_trial:
+        days = 7
+        amount = 1.0
+        plan_type = 'vpn_regular'
+        tariff_category = 'regular'
+        devices_limit = 2
+        if user.get('trial_used', 0) == 1:
+            return (jsonify({'error': 'Пробный период уже использован'}), 400)
+
+    if days <= 0 and not is_trial:
+        return (jsonify({'error': 'Укажите срок подписки'}), 400)
+
+    # Все платные тарифы идут с автопродлением (привязка карты через виджет)
+    invoice_id = f'inv_{uuid_lib.uuid4().hex[:20]}'
+    description = (
+        '1FEDERAL VPN — пробный период 7 дней за 1₽'
+        if is_trial
+        else f'1FEDERAL VPN — подписка на {days} дн.'
+    )
+
+    ok = database.create_payment_intent(
+        invoice_id=invoice_id,
+        user_id=int(user_id),
+        amount=amount,
+        days=days,
+        plan_type=plan_type,
+        tariff_category=tariff_category,
+        devices_limit=devices_limit,
+        is_trial=is_trial,
+        action_type=action_type,
+        vpn_key_id=int(vpn_key_id) if vpn_key_id else None,
+    )
+    if not ok:
+        return (jsonify({'error': 'Не удалось создать платёж'}), 500)
+
+    widget = cloudpayments.cloudpayments_api.widget_params(
+        amount=amount,
+        account_id=str(user_id),
+        invoice_id=invoice_id,
+        description=description,
+    )
+    return jsonify({
+        'payment_id': invoice_id,
+        'invoice_id': invoice_id,
+        'status': 'pending',
+        'amount': amount,
+        'recurring': True,
+        'provider': 'cloudpayments',
+        'widget': widget,
+        'method': method,
+    })
+
+
+@app.route('/api/payment/config', methods=['GET'])
+
+def payment_config():
+    return jsonify({
+        'provider': 'cloudpayments',
+        'configured': cloudpayments.cloudpayments_api.is_configured,
+        'public_id': cloudpayments.cloudpayments_api.public_id if cloudpayments.cloudpayments_api.is_configured else '',
+    })
 
 
 @app.route('/api/payment/recurring', methods=['GET'])
@@ -580,7 +572,7 @@ def list_recurring_payments():
     user = database.get_user_by_id(user_id)
     if not user:
         return (jsonify({'error': 'User not found'}), 404)
-    items = database.get_active_platega_subscriptions_for_user(user_id)
+    items = database.get_active_recurring_subscriptions_for_user(user_id)
     return jsonify({'subscriptions': items})
 
 
@@ -594,13 +586,14 @@ def cancel_recurring_payment(subscription_id: str):
     user = database.get_user_by_id(user_id)
     if not user:
         return (jsonify({'error': 'User not found'}), 404)
-    local = database.get_platega_subscription(subscription_id)
+    local = database.get_recurring_subscription(subscription_id)
     if not local or int(local['user_id']) != int(user_id):
         return (jsonify({'error': 'Subscription not found'}), 404)
-    result = platega.platega_api.cancel_subscription(subscription_id)
-    if not result.get('ok'):
-        return (jsonify({'error': result.get('error') or 'Cancel failed', 'details': result.get('response')}), 400)
-    database.update_platega_subscription(subscription_id, status='CANCELLED')
+    database.update_recurring_subscription(subscription_id, status='CANCELLED', next_charge_at=None)
+    core.send_notification_to_user(
+        user['telegram_id'],
+        'ℹ️ Автопродление подписки отключено. Текущий период действует до даты окончания.',
+    )
     return jsonify({'success': True, 'subscription_id': subscription_id, 'status': 'CANCELLED'})
 
 @app.route('/api/promocode/apply', methods=['POST'])
@@ -773,14 +766,10 @@ def delete_payment_method(method_id: int):
     user = database.get_user_by_telegram_id(telegram_id)
     if not user:
         return (jsonify({'error': 'User not found'}), 404)
-    conn = database.get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute('\n            UPDATE saved_payment_methods\n            SET is_active = 0\n            WHERE id = ? AND user_id = ?\n        ', (method_id, user['id']))
-        conn.commit()
-        return jsonify({'success': True})
-    finally:
-        conn.close()
+    ok = recurring_billing.deactivate_card_and_cancel_recurring(user['id'], method_id)
+    if not ok:
+        return (jsonify({'error': 'Payment method not found'}), 404)
+    return jsonify({'success': True})
 
 @app.route('/api/user/devices/<int:device_id>', methods=['DELETE'])
 
@@ -890,9 +879,9 @@ def extend_subscription():
         if applied_promo_discount:
             database.clear_user_promo_discount(user_id)
         try:
-            database.link_platega_subscription_to_vpn_key(user_id, int(key_id))
+            database.link_recurring_subscription_to_vpn_key(user_id, int(key_id))
         except Exception as e:
-            logger.error('Failed to link platega subscription on extend: %s', e)
+            logger.error('Failed to link recurring subscription on extend: %s', e)
         return jsonify({'success': True, 'key_id': key_id, 'new_expiry': new_expiry_str})
     except Exception as e:
         logger.error(f'Error extending subscription: {e}')
@@ -962,7 +951,10 @@ def create_subscription():
             if user.get('trial_used', 0) == 1:
                 return (jsonify({'error': 'Пробный период уже использован'}), 400)
             days = int(data.get('days', 7) or 7)
-            price = 0.0
+            # Платный пробный период 7 дней за 1₽ (карта уже привязана)
+            price = float(data.get('price', 1) or 1)
+            if price <= 0:
+                price = 1.0
             devices_limit = int(data.get('devices_limit', 2) or 2)
             plan_type = 'vpn_regular'
             tariff_category = 'regular'
@@ -988,7 +980,7 @@ def create_subscription():
         cursor = conn.cursor()
         if is_trial:
             cursor.execute('UPDATE users SET trial_used = 1 WHERE id = ?', (user_id,))
-            description = f'Пробная подписка ({days} дней)'
+            description = f'Пробная подписка 7 дней за 1₽'
             trans_type = 'trial'
         else:
             if finalize_promo_id:
@@ -1018,9 +1010,9 @@ def create_subscription():
                     logger.error(f'Failed to notify referrer: {e}')
         if result.get('key_id'):
             try:
-                database.link_platega_subscription_to_vpn_key(user_id, int(result['key_id']))
+                database.link_recurring_subscription_to_vpn_key(user_id, int(result['key_id']))
             except Exception as e:
-                logger.error('Failed to link platega subscription to key: %s', e)
+                logger.error('Failed to link recurring subscription to key: %s', e)
         return jsonify({'success': True, 'subscription': result})
     if price > 0:
         database.update_user_balance(user_id, price)
@@ -2449,7 +2441,17 @@ def get_public_page(page_type: str):
 @require_auth
 
 def get_settings():
-    env_settings = {'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN', ''), 'TELEGRAM_ADMIN_IDS': os.getenv('TELEGRAM_ADMIN_IDS', os.getenv('TELEGRAM_ADMIN_ID', '')), 'REMWAVE_PANEL_URL': os.getenv('REMWAVE_PANEL_URL', os.getenv('REMWAVE_API_URL', '')), 'REMWAVE_API_KEY': os.getenv('REMWAVE_API_KEY', ''), 'PLATEGA_MERCHANT_ID': os.getenv('PLATEGA_MERCHANT_ID', ''), 'PLATEGA_SECRET_KEY': os.getenv('PLATEGA_SECRET_KEY', ''), 'PLATEGA_API_URL': os.getenv('PLATEGA_API_URL', 'https://app.platega.io'), 'TRIAL_HOURS': os.getenv('TRIAL_HOURS', '24'), 'PANEL_PASSWORD_SET': '1'}
+    env_settings = {
+        'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN', ''),
+        'TELEGRAM_ADMIN_IDS': os.getenv('TELEGRAM_ADMIN_IDS', os.getenv('TELEGRAM_ADMIN_ID', '')),
+        'REMWAVE_PANEL_URL': os.getenv('REMWAVE_PANEL_URL', os.getenv('REMWAVE_API_URL', '')),
+        'REMWAVE_API_KEY': os.getenv('REMWAVE_API_KEY', ''),
+        'CLOUDPAYMENTS_PUBLIC_ID': os.getenv('CLOUDPAYMENTS_PUBLIC_ID', ''),
+        'CLOUDPAYMENTS_API_SECRET': os.getenv('CLOUDPAYMENTS_API_SECRET', ''),
+        'CLOUDPAYMENTS_API_URL': os.getenv('CLOUDPAYMENTS_API_URL', 'https://api.cloudpayments.ru'),
+        'TRIAL_HOURS': os.getenv('TRIAL_HOURS', '24'),
+        'PANEL_PASSWORD_SET': '1',
+    }
     return jsonify(env_settings)
 
 @app.route('/api/panel/settings', methods=['PUT'])
@@ -2476,8 +2478,8 @@ def update_settings():
             updates['TELEGRAM_ADMIN_ID'] = os.environ['TELEGRAM_ADMIN_ID']
         if updates:
             _save_env_map(env_path, updates)
-        if any(k.startswith('PLATEGA_') for k in updates):
-            platega.platega_api.reload_from_env()
+        if any(k.startswith('CLOUDPAYMENTS_') for k in updates):
+            cloudpayments.cloudpayments_api.reload_from_env()
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f'Error updating settings: {e}')
@@ -2554,7 +2556,7 @@ def get_payment_settings():
             if provider not in settings:
                 settings[provider] = {}
             settings[provider][row['setting_key']] = row['setting_value']
-        providers = ['platega']
+        providers = ['cloudpayments']
         for p in providers:
             if p not in settings:
                 settings[p] = {'enabled': '0'}
@@ -2574,21 +2576,22 @@ def update_payment_settings(provider: str):
         for key, value in data.items():
             cursor.execute('\n                INSERT OR REPLACE INTO payment_provider_settings (provider, setting_key, setting_value, updated_at)\n                VALUES (?, ?, ?, CURRENT_TIMESTAMP)\n            ', (provider, key, str(value)))
         conn.commit()
-        if provider == 'platega':
+        if provider == 'cloudpayments':
             env_updates = {}
-            if 'merchant_id' in data:
-                os.environ['PLATEGA_MERCHANT_ID'] = str(data['merchant_id'])
-                env_updates['PLATEGA_MERCHANT_ID'] = str(data['merchant_id'])
-            if 'secret_key' in data:
-                os.environ['PLATEGA_SECRET_KEY'] = str(data['secret_key'])
-                env_updates['PLATEGA_SECRET_KEY'] = str(data['secret_key'])
+            if 'public_id' in data:
+                os.environ['CLOUDPAYMENTS_PUBLIC_ID'] = str(data['public_id'])
+                env_updates['CLOUDPAYMENTS_PUBLIC_ID'] = str(data['public_id'])
+            if 'api_secret' in data or 'secret_key' in data:
+                secret = str(data.get('api_secret') or data.get('secret_key') or '')
+                os.environ['CLOUDPAYMENTS_API_SECRET'] = secret
+                env_updates['CLOUDPAYMENTS_API_SECRET'] = secret
             if 'api_url' in data:
-                os.environ['PLATEGA_API_URL'] = str(data['api_url'])
-                env_updates['PLATEGA_API_URL'] = str(data['api_url'])
+                os.environ['CLOUDPAYMENTS_API_URL'] = str(data['api_url'])
+                env_updates['CLOUDPAYMENTS_API_URL'] = str(data['api_url'])
             if env_updates:
                 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
                 _save_env_map(env_path, env_updates)
-            platega.platega_api.reload_from_env()
+            cloudpayments.cloudpayments_api.reload_from_env()
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f'Error updating payment settings for {provider}: {e}')

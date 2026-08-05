@@ -219,12 +219,16 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    location /platega {
+    location /cloudpayments {
         proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /platega {
+        return 410;
     }
 }
 
@@ -298,9 +302,9 @@ TELEGRAM_ADMIN_ID=${TELEGRAM_ADMIN_ID}
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
 
-PLATEGA_MERCHANT_ID=
-PLATEGA_SECRET_KEY=
-PLATEGA_API_URL=https://app.platega.io
+CLOUDPAYMENTS_PUBLIC_ID=
+CLOUDPAYMENTS_API_SECRET=
+CLOUDPAYMENTS_API_URL=https://api.cloudpayments.ru
 
 NALOG_ENABLED=false
 NALOG_INN=
@@ -535,7 +539,7 @@ ${BOLD}API:${NC}
   ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/api${NC}
 
 ${BOLD}Webhooks:${NC}
-  Platega:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/platega${NC}
+  CloudPayments:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/cloudpayments${NC}
 
 ${BOLD}Авторизация в панели:${NC}
   ${CYAN}При первом входе в панель будут автоматически созданы${NC}

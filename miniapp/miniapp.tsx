@@ -177,10 +177,14 @@ const formatBenefitPercent = (value: number) =>
 const PLAN_TERM_BENEFITS: Record<'regular' | 'family', Record<number, { oldPrice: number; benefitPercent: number }>> = {
   regular: {
     30: { oldPrice: 499, benefitPercent: 0 },
+    90: { oldPrice: 1497, benefitPercent: 6.5 },
+    180: { oldPrice: 2994, benefitPercent: 9.9 },
     365: { oldPrice: 5988, benefitPercent: 16.5 },
   },
   family: {
     30: { oldPrice: 899, benefitPercent: 0 },
+    90: { oldPrice: 2697, benefitPercent: 7.3 },
+    180: { oldPrice: 5394, benefitPercent: 9.2 },
     365: { oldPrice: 10788, benefitPercent: 16.6 },
   },
 };
@@ -189,7 +193,7 @@ const enrichPlanBenefit = (plan: Plan): Plan => {
   if (plan.isTrial || plan.price <= 0) return plan;
   if (plan.oldPrice != null && plan.benefitPercent != null) return plan;
   const category = plan.tariffCategory === 'family' ? 'family' : 'regular';
-  const daysKey = [30, 365].find((d) => Math.abs(plan.days - d) <= 5) ?? plan.days;
+  const daysKey = [30, 90, 180, 365].find((d) => Math.abs(plan.days - d) <= 5) ?? plan.days;
   const benefit = PLAN_TERM_BENEFITS[category][daysKey];
   if (!benefit) return plan;
   return {
@@ -259,7 +263,9 @@ interface PlatformData {
 }
 
 const OFFER_AGREEMENT_TEXT = `
-**Редакция от 03.08.2026**
+**Пользовательское соглашение (Публичная оферта)**
+**VPN-сервиса 1Federal VPN**
+**Редакция от 22.08.2026**
 
 Индивидуальный предприниматель Султанов Мансур Масудович, ОГРНИП 32620000039442, ИНН 771974193080, далее именуемый «Продавец», предлагает любому дееспособному лицу (далее — «Покупатель») заключить договор на условиях настоящей публичной оферты.
 Настоящий документ является публичной офертой в соответствии с п. 2 ст. 437 Гражданского кодекса РФ. Оплата Заказа признаётся полным акцептом оферты.
@@ -350,7 +356,7 @@ const OFFER_AGREEMENT_TEXT = `
 
 **9.4.** Начало использования сайта app.1federal.one или Телеграм-бота @onefederalbot означает полное принятие условий настоящего соглашения.
 
-Реквизиты: Сервис 1federal · Телеграм-бот @onefederalbot · Сайт app.1federal.one · Поддержка @onefederal_support
+Реквизиты: ИП Султанов Мансур Масудович · ОГРНИП 32620000039442 · ИНН 771974193080 · Сервис 1federal · Телеграм-бот @onefederalbot · Сайт app.1federal.one · Поддержка @onefederal_support
 `
 
 const PRIVACY_POLICY_TEXT = `
@@ -379,7 +385,7 @@ const PRIVACY_POLICY_TEXT = `
 
 **2.1.2. Данные для оказания услуг:** сведения о выбранном тарифе, история платежей, статус подписки, техническая информация о подключениях к Сервису.
 
-**2.1.3. Платёжные данные:** факт и сумма оплаты, идентификатор транзакции. Полные реквизиты банковской карты Оператором не собираются — их обработка осуществляется исключительно платёжными агентами (ООО НКО «ЮMoney», ООО «Platega») в соответствии с требованиями PCI DSS.
+**2.1.3. Платёжные данные:** факт и сумма оплаты, идентификатор транзакции. Полные реквизиты банковской карты Оператором не собираются — их обработка осуществляется исключительно платёжным агентом (ООО «CloudPayments») в соответствии с требованиями PCI DSS.
 
 **2.1.4. Технические данные:** IP-адрес, данные об устройстве и программном обеспечении, файлы cookie, иные технические сведения, автоматически передаваемые при использовании Сайта.
 
@@ -412,7 +418,7 @@ const PRIVACY_POLICY_TEXT = `
 ### 6. ПЕРЕДАЧА ДАННЫХ ТРЕТЬИМ ЛИЦАМ
 
 **6.1.** Оператор не передаёт персональные данные третьим лицам, за исключением:
-* Платёжных агентов (ООО НКО «ЮMoney», ООО «Platega») — для обработки платежей.
+* Платёжных агентов (ООО «CloudPayments») — для обработки платежей.
 * Хостинг- и серверных провайдеров — для технического обеспечения Сервиса.
 * Государственных органов Российской Федерации — по законному запросу.
 
@@ -446,14 +452,18 @@ const PRIVACY_POLICY_TEXT = `
 
 **10.2.** Все споры разрешаются в порядке, предусмотренном законодательством Российской Федерации.
 
-Реквизиты: Сервис 1federal · Телеграм-бот @onefederalbot · Сайт app.1federal.one · Поддержка @onefederal_support
+Реквизиты: ИП Султанов Мансур Масудович · ОГРНИП 32620000039442 · ИНН 771974193080 · Сервис 1federal · Телеграм-бот @onefederalbot · Сайт app.1federal.one · Поддержка @onefederal_support
 `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
-  { id: 'trial_7d', duration: 'Пробная подписка', price: 0, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'trial_7d', duration: 'Пробная подписка', price: 1, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
   { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 499, benefitPercent: 0 },
+  { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
+  { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.9 },
   { id: 'reg_y1', duration: '12 месяцев', price: 4999, highlight: false, days: 365, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 5988, benefitPercent: 16.5 },
   { id: 'fam_m1', duration: '1 месяц', price: 899, highlight: false, days: 30, tariffCategory: 'family', devicesLimit: 5, oldPrice: 899, benefitPercent: 0 },
+  { id: 'fam_m3', duration: '3 месяца', price: 2499, highlight: false, days: 90, tariffCategory: 'family', devicesLimit: 5, oldPrice: 2697, benefitPercent: 7.3 },
+  { id: 'fam_m6', duration: '6 месяцев', price: 4899, highlight: false, days: 180, tariffCategory: 'family', devicesLimit: 5, oldPrice: 5394, benefitPercent: 9.2 },
   { id: 'fam_y1', duration: '12 месяцев', price: 8999, highlight: false, days: 365, tariffCategory: 'family', devicesLimit: 5, oldPrice: 10788, benefitPercent: 16.6 },
 ];
 
@@ -769,6 +779,8 @@ export default function App() {
   const [paymentStarting, setPaymentStarting] = useState(false);
   const [recurringSubs, setRecurringSubs] = useState<any[]>([]);
   const [cancellingRecurring, setCancellingRecurring] = useState(false);
+  const [savedCards, setSavedCards] = useState<any[]>([]);
+  const [unlinkingCard, setUnlinkingCard] = useState(false);
 
   const [pendingAction, setPendingAction] = useState<{ type: string, payload: any } | null>(null);
 
@@ -893,6 +905,12 @@ export default function App() {
         setRecurringSubs(Array.isArray(rec?.subscriptions) ? rec.subscriptions : []);
       } catch (e) {
         console.error('Failed to load recurring subscriptions', e);
+      }
+      try {
+        const cards = await miniApiFetch(`/user/payment-methods?telegram_id=${tgId}`);
+        setSavedCards(Array.isArray(cards) ? cards : []);
+      } catch (e) {
+        console.error('Failed to load payment methods', e);
       }
     }
 
@@ -1262,24 +1280,44 @@ export default function App() {
       ? action.payload?.plan
       : action.payload?.wizardPlan;
     const days = Number(plan?.days || action.payload?.days || 0);
-    const isRecurringEligible = days === 30 || days === 365;
+    const isTrial = !!plan?.isTrial;
+
+    const loadCpScript = (): Promise<void> => new Promise((resolve, reject) => {
+      const w = window as any;
+      if (w.cp?.CloudPayments) {
+        resolve();
+        return;
+      }
+      const existing = document.querySelector('script[data-cloudpayments]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve());
+        existing.addEventListener('error', () => reject(new Error('CP load failed')));
+        return;
+      }
+      const s = document.createElement('script');
+      s.src = 'https://widget.cloudpayments.ru/bundles/cloudpayments.js';
+      s.async = true;
+      s.setAttribute('data-cloudpayments', '1');
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('CP load failed'));
+      document.head.appendChild(s);
+    });
 
     try {
       const body: Record<string, unknown> = {
         user_id: currentUserId,
         amount,
-        method: 'platega_sbp',
+        method: 'cloudpayments',
+        days,
+        recurring: true,
+        is_trial: isTrial,
+        tariff_category: plan?.tariffCategory || 'regular',
+        plan_type: plan?.tariffCategory === 'family' ? 'vpn_family' : 'vpn_regular',
+        devices_limit: plan?.devicesLimit || (plan?.tariffCategory === 'family' ? 5 : 2),
+        action_type: action.type,
       };
-      if (isRecurringEligible && plan) {
-        body.recurring = true;
-        body.days = days;
-        body.tariff_category = plan.tariffCategory || 'regular';
-        body.plan_type = plan.tariffCategory === 'family' ? 'vpn_family' : 'vpn_regular';
-        body.devices_limit = plan.devicesLimit || (plan.tariffCategory === 'family' ? 5 : 2);
-        body.action_type = action.type;
-        if (action.type === 'extend' && action.payload?.device?.id) {
-          body.key_id = action.payload.device.id;
-        }
+      if (action.type === 'extend' && action.payload?.device?.id) {
+        body.key_id = action.payload.device.id;
       }
 
       const res = await miniApiFetch('/payment/create', {
@@ -1287,24 +1325,77 @@ export default function App() {
         body: JSON.stringify(body),
       });
 
-      const payUrl = res?.confirmation_url || res?.payment_url;
-      if (!payUrl) {
+      const widget = res?.widget;
+      if (!widget) {
         alert(res?.error || 'Не удалось создать платёж, попробуйте позже');
         setPendingAction(null);
         return;
       }
 
-      setPaymentUrl(payUrl);
-      try {
-        if (window.Telegram?.WebApp?.openLink) {
-          window.Telegram.WebApp.openLink(payUrl);
-        } else {
-          window.open(payUrl, '_blank');
-        }
-      } catch {
-        window.open(payUrl, '_blank');
-      }
+      await loadCpScript();
       setView('wait_payment');
+      setPaymentPolling(true);
+
+      const w = window as any;
+      const cpWidget = new w.cp.CloudPayments();
+      const intentParams = {
+        publicTerminalId: widget.publicTerminalId || widget.publicId,
+        description: widget.description || '1FEDERAL VPN',
+        paymentSchema: 'Single',
+        currency: widget.currency || 'RUB',
+        culture: 'ru-RU',
+        amount: Number(widget.amount),
+        skin: 'modern',
+        autoClose: 3,
+        externalId: widget.externalId || widget.invoiceId,
+        userInfo: widget.userInfo || { accountId: String(currentUserId) },
+      };
+
+      const onFail = (msg?: string) => {
+        alert(msg || 'Оплата не прошла. Попробуйте ещё раз.');
+        setPendingAction(null);
+        setPaymentPolling(false);
+        setView('home');
+      };
+
+      if (typeof cpWidget.start === 'function') {
+        try {
+          const result = await cpWidget.start(intentParams);
+          const type = result?.type;
+          const status = result?.status || result?.data?.status;
+          if (type === 'cancel') {
+            onFail('Оплата отменена');
+            return;
+          }
+          if (status === 'fail' || type === 'error') {
+            onFail('Оплата не прошла');
+            return;
+          }
+          // success — ждём Pay-webhook и рост баланса
+        } catch (e: any) {
+          if (e?.type === 'cancel' || e?.message === 'cancel') {
+            onFail('Оплата отменена');
+          } else {
+            console.error(e);
+            onFail();
+          }
+        }
+      } else if (typeof cpWidget.pay === 'function') {
+        cpWidget.pay('charge', {
+          publicId: widget.publicId || widget.publicTerminalId,
+          description: widget.description || '1FEDERAL VPN',
+          amount: Number(widget.amount),
+          currency: 'RUB',
+          accountId: String(currentUserId),
+          invoiceId: widget.invoiceId || widget.externalId,
+          skin: 'modern',
+        }, {
+          onSuccess: () => { /* polling */ },
+          onFail: () => onFail(),
+        });
+      } else {
+        onFail('Платёжный виджет недоступен');
+      }
     } catch (e) {
       console.error(e);
       alert('Не удалось создать платёж, попробуйте позже');
@@ -1328,10 +1419,10 @@ export default function App() {
         />
         <div className="relative">
           <h3 className="text-base font-bold text-white uppercase tracking-wide mb-2">
-            Бесплатный пробный период
+            Пробный период за 1₽
           </h3>
           <p className="text-sm text-gray-400 mb-6">
-            Попробуйте наш VPN бесплатно
+            7 дней доступа · далее 499₽/мес с привязанной карты
           </p>
           <div className="grid grid-cols-3 gap-3 mb-6">
             <div>
@@ -1339,8 +1430,8 @@ export default function App() {
               <div className="text-xs text-gray-500 mt-1">дней</div>
             </div>
             <div>
-              <div className="text-3xl font-bold text-white leading-none">10</div>
-              <div className="text-xs text-gray-500 mt-1">ГБ</div>
+              <div className="text-3xl font-bold text-white leading-none">1₽</div>
+              <div className="text-xs text-gray-500 mt-1">сейчас</div>
             </div>
             <div>
               <div className="text-3xl font-bold text-white leading-none">{devicesLimit}</div>
@@ -1351,7 +1442,7 @@ export default function App() {
             onClick={activateTrial}
             className="w-full py-3.5 rounded-full bg-blue-500 hover:bg-blue-600 text-white font-semibold text-sm transition-colors shadow-[0_4px_24px_rgba(59,130,246,0.35)]"
           >
-            Активировать бесплатно
+            Попробовать за 1₽
           </button>
         </div>
       </div>
@@ -1434,6 +1525,7 @@ export default function App() {
       refreshUserData(),
       refreshDevices(),
       refreshRecurringSubs(),
+      refreshSavedCards(),
     ]);
   };
 
@@ -1445,6 +1537,38 @@ export default function App() {
       setRecurringSubs(Array.isArray(res?.subscriptions) ? res.subscriptions : []);
     } catch (e) {
       console.error('Failed to load recurring subscriptions', e);
+    }
+  };
+
+  const refreshSavedCards = async () => {
+    if (!telegramId) return;
+    try {
+      const res = await miniApiFetch(`/user/payment-methods?telegram_id=${telegramId}`);
+      setSavedCards(Array.isArray(res) ? res : []);
+    } catch (e) {
+      console.error('Failed to load payment methods', e);
+    }
+  };
+
+  const unlinkCard = async (methodId: number) => {
+    if (!telegramId || unlinkingCard) return;
+    if (!confirm('Отвязать карту? Автопродление подписки также будет отключено.')) return;
+    setUnlinkingCard(true);
+    try {
+      const res = await miniApiFetch(`/user/payment-methods/${methodId}?telegram_id=${telegramId}`, {
+        method: 'DELETE',
+      });
+      if (res?.success) {
+        await Promise.all([refreshSavedCards(), refreshRecurringSubs()]);
+        alert('Карта отвязана');
+      } else {
+        alert(res?.error || 'Не удалось отвязать карту');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Ошибка при отвязке карты');
+    } finally {
+      setUnlinkingCard(false);
     }
   };
 
@@ -1767,14 +1891,14 @@ export default function App() {
     }
 
     const price = wizardPlan.isTrial
-      ? (wizardPlan.price || 0)
+      ? Math.max(Number(wizardPlan.price) || 1, 1)
       : priceAfterPromoDiscount(wizardPlan.price);
     const tariffLabel = wizardPlan.tariffCategory === 'family' ? 'Семейный' : 'Обычный';
     const name = wizardPlan.isTrial
-      ? 'Пробная подписка'
+      ? 'Пробная подписка 7 дней за 1₽'
       : `${tariffLabel} (${wizardPlan.duration})`;
 
-    if (price > 0) {
+    if (wizardPlan.isTrial || price > 0) {
       startCheckout(price, {
         type: 'wizard',
         payload: { wizardType: 'vpn', wizardPlan, price, name },
@@ -1788,7 +1912,6 @@ export default function App() {
         body: JSON.stringify({
           user_id: currentUserId,
           ...buildPlanPayload(wizardPlan, 0),
-          ...(wizardPlan.isTrial ? { is_trial: true } : {}),
         }),
       });
 
@@ -1964,6 +2087,7 @@ export default function App() {
                     <div className="text-xs text-emerald-400/90 px-1">
                       Автопродление включено
                       {s.next_charge_at ? ` · след. списание ${new Date(s.next_charge_at).toLocaleDateString('ru-RU')}` : ''}
+                      {s.status === 'PAST_DUE' ? ' · повтор оплаты' : ''}
                     </div>
                     <button
                       onClick={() => cancelRecurring(s.subscription_id)}
@@ -1974,6 +2098,27 @@ export default function App() {
                     </button>
                   </div>
                 ))}
+                {savedCards.length > 0 && (
+                  <div className="pt-2 space-y-2 border-t border-white/10">
+                    <div className="text-xs text-gray-400 px-1 flex items-center gap-1.5">
+                      <CreditCard size={12} /> Привязанные карты
+                    </div>
+                    {savedCards.map((card: any) => (
+                      <div key={card.id} className="flex items-center justify-between gap-2 bg-black/20 rounded-xl px-3 py-2.5">
+                        <div className="text-sm text-white">
+                          {card.card_brand || 'Карта'} ···· {card.card_last4 || '????'}
+                        </div>
+                        <button
+                          onClick={() => unlinkCard(card.id)}
+                          disabled={unlinkingCard}
+                          className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
+                        >
+                          Отвязать
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {deviceNeedsRenew(subscription) && (
                   <button
                     onClick={() => openDeviceRenew(subscription)}
@@ -1984,6 +2129,28 @@ export default function App() {
                 )}
               </div>
             )}
+            </div>
+          )}
+
+          {savedCards.length > 0 && !subscription && (
+            <div className="bg-white/5 rounded-2xl p-4 border border-white/10 space-y-2">
+              <div className="text-xs text-gray-400 flex items-center gap-1.5">
+                <CreditCard size={12} /> Привязанные карты
+              </div>
+              {savedCards.map((card: any) => (
+                <div key={card.id} className="flex items-center justify-between gap-2 bg-black/20 rounded-xl px-3 py-2.5">
+                  <div className="text-sm text-white">
+                    {card.card_brand || 'Карта'} ···· {card.card_last4 || '????'}
+                  </div>
+                  <button
+                    onClick={() => unlinkCard(card.id)}
+                    disabled={unlinkingCard}
+                    className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
+                  >
+                    Отвязать
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 
@@ -2115,7 +2282,7 @@ export default function App() {
                   </div>
                 )}
                 {wizardPlan?.isTrial && (
-                  <div className="text-sm text-gray-500 mb-6">7 дней · до 2 устройств</div>
+                  <div className="text-sm text-gray-500 mb-6">7 дней за 1₽ · далее 499₽/мес · до 2 устройств</div>
                 )}
 
                 <div className="border-t border-white/10 pt-4 flex justify-between items-center">
@@ -2126,8 +2293,12 @@ export default function App() {
                           ? priceAfterPromoDiscount(wizardPlan.price)
                           : (wizardPlan?.price ?? 0))} ₽
                     </span>
-                    {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && (wizardPlan.days === 30 || wizardPlan.days === 365) && (
-                      <div className="text-xs text-emerald-400/80 mt-1">С автопродлением через СБП</div>
+                    {wizardPlan && wizardPlan.id !== 'promo_sub' && (
+                      <div className="text-xs text-emerald-400/80 mt-1">
+                        {wizardPlan.isTrial
+                          ? 'Привязка карты · автосписание 499₽ через 7 дней'
+                          : 'С автопродлением по карте'}
+                      </div>
                     )}
                     {wizardPlan && !wizardPlan.isTrial && wizardPlan.id !== 'promo_sub' && (
                       <>
@@ -2156,12 +2327,14 @@ export default function App() {
                 <Button
                   onClick={wizardActivate}
                   disabled={paymentStarting}
-                  variant={wizardPlan?.isTrial || (wizardPlan?.price === 0) || wizardPlan?.id === 'promo_sub' ? 'trial' : 'primary'}
+                  variant={wizardPlan?.id === 'promo_sub' || (wizardPlan?.price === 0 && !wizardPlan?.isTrial) ? 'trial' : 'primary'}
                 >
                     {paymentStarting
-                      ? 'Переходим к оплате...'
-                      : wizardPlan?.id === 'promo_sub' || wizardPlan?.isTrial || wizardPlan?.price === 0
+                      ? 'Открываем оплату...'
+                      : wizardPlan?.id === 'promo_sub'
                       ? 'Активировать бесплатно'
+                      : wizardPlan?.isTrial
+                      ? 'Оплатить 1 ₽'
                       : `Оплатить ${priceAfterPromoDiscount(wizardPlan?.price || 0)} ₽`}
                 </Button>
             </div>

@@ -354,6 +354,7 @@ async def handle_withdraw_cancel(callback: CallbackQuery):
         await callback.answer('Ошибка', show_alert=True)
 
 async def subscription_notifications_task():
+    """Помечает истекшие ключи и удаляет их; напоминания «скоро закончится» отключены."""
     while True:
         try:
             await asyncio.sleep(3600)
@@ -361,25 +362,6 @@ async def subscription_notifications_task():
             cursor = conn.cursor()
             from datetime import datetime, timedelta
             now = datetime.now()
-            notification_intervals = [(3, 'days', '3 дня'), (2, 'days', '2 дня'), (1, 'days', '1 день'), (3, 'hours', '3 часа')]
-            for value, unit, text in notification_intervals:
-                if unit == 'days':
-                    target_time = now + timedelta(days=value)
-                    window_start = target_time - timedelta(hours=1)
-                    window_end = target_time + timedelta(hours=1)
-                else:
-                    target_time = now + timedelta(hours=value)
-                    window_start = target_time - timedelta(minutes=30)
-                    window_end = target_time + timedelta(minutes=30)
-                cursor.execute("\n                    SELECT vk.id, vk.key_uuid, vk.expiry_date, u.telegram_id\n                    FROM vpn_keys vk\n                    JOIN users u ON vk.user_id = u.id\n                    WHERE vk.status = 'Active'\n                      AND datetime(vk.expiry_date) BETWEEN ? AND ?\n                ", (window_start.isoformat(), window_end.isoformat()))
-                for row in cursor.fetchall():
-                    key_id = row['id']
-                    key_uuid = row['key_uuid']
-                    telegram_id = row['telegram_id']
-                    short_id = key_uuid[:8] if key_uuid else f'#{key_id}'
-                    msg = f'⚠️ <b>Ваша подписка скоро закончится</b>\n\nЧерез {text} ваш ключ {short_id} закончится. Чтобы сохранить доступ в свободный интернет, оплатите подписку!'
-                    core.send_notification_to_user(telegram_id, msg)
-                    logger.info(f'Sent expiry reminder ({text}) to {telegram_id} for key {key_id}')
             cursor.execute("\n                SELECT vk.id, vk.key_uuid, vk.expiry_date, u.telegram_id\n                FROM vpn_keys vk\n                JOIN users u ON vk.user_id = u.id\n                WHERE vk.status = 'Active'\n                  AND datetime(vk.expiry_date) < ?\n            ", (now.isoformat(),))
             for row in cursor.fetchall():
                 key_id = row['id']
@@ -414,6 +396,19 @@ async def subscription_notifications_task():
         except Exception as e:
             logger.error(f'Error in subscription_notifications_task: {e}')
             await asyncio.sleep(60)
+
+async def cloudpayments_recurring_task():
+    """Автосписания CloudPayments + ретраи 30м/1ч/2ч/12ч/24ч."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            from backend.api import recurring as recurring_billing
+            n = await asyncio.to_thread(recurring_billing.process_due_charges, 50)
+            if n:
+                logger.info('CloudPayments recurring: processed %s due charges', n)
+        except Exception as e:
+            logger.error(f'Error in cloudpayments_recurring_task: {e}')
+            await asyncio.sleep(30)
 
 async def auto_renewal_task():
     while True:
@@ -530,7 +525,8 @@ async def main():
     asyncio.create_task(auto_refund_expired_withdrawals())
     asyncio.create_task(subscription_notifications_task())
     asyncio.create_task(weekly_reminder_task())
-    asyncio.create_task(auto_renewal_task())
+    asyncio.create_task(cloudpayments_recurring_task())
+    # Балансное автопродление отключено — используется CloudPayments
     logger.info('Бот запущен...')
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
