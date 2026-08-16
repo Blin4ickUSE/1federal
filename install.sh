@@ -280,12 +280,6 @@ create_env_file() {
     PANEL_SECRET=$(openssl rand -hex 32)
     log_info "Секретный ключ панели сгенерирован автоматически."
 
-    log_info "\n${CYAN}TON кошелёк для автовывода USDT:${NC}"
-    prompt "Сид-фраза TON кошелька (слова через пробел): " TON_WALLET_MNEMONIC
-    if [[ -z "${TON_WALLET_MNEMONIC}" ]]; then
-        log_warn "Сид-фраза не указана — автовывод USDT будет недоступен."
-    fi
-    
     local port_suffix=""
     if [[ "$ssl_port" != "443" ]]; then
         port_suffix=":${ssl_port}"
@@ -301,14 +295,6 @@ REMWAVE_API_KEY=${REMWAVE_API_KEY}
 CLOUDPAYMENTS_PUBLIC_ID=
 CLOUDPAYMENTS_API_SECRET=
 CLOUDPAYMENTS_API_URL=https://api.cloudpayments.ru
-
-NALOG_ENABLED=false
-NALOG_INN=
-NALOG_PASSWORD=
-NALOG_TOKEN_PATH=data/nalog_token.json
-NALOG_SERVICE_NAME=Приобретение услуги в RSecktor Pay
-
-TON_WALLET_MNEMONIC=${TON_WALLET_MNEMONIC}
 
 PANEL_SECRET=${PANEL_SECRET}
 
@@ -329,14 +315,23 @@ SSL_EMAIL=${email}
 PANEL_DOMAIN=${panel_domain}
 MINIAPP_DOMAIN=${domain}
 WEBHOOK_DOMAIN=${domain}
+
+MAIL_DOMAIN=${domain}
+MAIL_FROM=no-reply@${domain}
+SMTP_HOST=mail
+SMTP_PORT=25
 EOF
 
     log_success "✔ Файл .env создан."
-    log_warn "\n⚠️  Платёжная система Lava настраивается"
-    log_warn "   в панели управления: https://${panel_domain}${port_suffix}"
+    log_warn "\n⚠️  CloudPayments настраивается в панели управления:"
+    log_warn "   https://${panel_domain}${port_suffix}"
+    log_info "\nПочта (OTP): письма уходят с no-reply@${domain}"
+    log_info "Добавьте SPF-запись для домена мини-приложения, например:"
+    log_info "  TXT @ \"v=spf1 a mx ip4:SERVER_IP ~all\""
 }
 
 REPO_URL="https://github.com/Blin4ickUSE/1federal.git"
+REPO_BRANCH="2.0"
 PROJECT_DIR="1federal"
 NGINX_CONF="/etc/nginx/sites-available/${PROJECT_DIR}.conf"
 NGINX_LINK="/etc/nginx/sites-enabled/${PROJECT_DIR}.conf"
@@ -352,8 +347,10 @@ if [[ -f "$NGINX_CONF" ]]; then
         exit 1
     fi
     cd "$PROJECT_DIR"
-    log_info "\nШаг 1: обновление исходного кода"
-    git pull --ff-only
+    log_info "\nШаг 1: обновление исходного кода (ветка ${REPO_BRANCH})"
+    git fetch origin "$REPO_BRANCH"
+    git checkout "$REPO_BRANCH"
+    git pull --ff-only origin "$REPO_BRANCH"
     log_success "✔ Репозиторий обновлён."
     log_info "\nШаг 2: пересборка и перезапуск контейнеров"
     sudo docker-compose down --remove-orphans
@@ -368,9 +365,10 @@ ensure_packages
 ensure_services
 ensure_certbot_nginx
 
-log_info "\nШаг 2: клонирование репозитория"
+log_info "\nШаг 2: клонирование репозитория (${REPO_BRANCH})"
+log_info "Источник: https://github.com/Blin4ickUSE/1federal/tree/${REPO_BRANCH}"
 if [[ ! -d "$PROJECT_DIR/.git" ]]; then
-    git clone "$REPO_URL" "$PROJECT_DIR"
+    git clone -b "$REPO_BRANCH" --single-branch "$REPO_URL" "$PROJECT_DIR"
 else
     log_warn "Каталог $PROJECT_DIR уже существует. Будет использована текущая версия."
 fi
@@ -521,9 +519,7 @@ fi
 
 cat <<SUMMARY
 
-${GREEN}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}
-${GREEN}┃${NC}  🎉 ${BOLD}Установка 1FEDERAL VPN завершена!${NC} 🎉                        ${GREEN}┃${NC}
-${GREEN}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}
+${GREEN}🎉 ${BOLD}Установка 1FEDERAL VPN завершена!${NC} 🎉
 
 ${BOLD}Мини-приложение:${NC}
   ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}${NC}
@@ -531,20 +527,7 @@ ${BOLD}Мини-приложение:${NC}
 ${BOLD}Веб‑панель:${NC}
   ${YELLOW}https://${PANEL_DOMAIN}${PORT_SUFFIX}${NC}
 
-${BOLD}API:${NC}
-  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/api${NC}
-
 ${BOLD}Webhooks:${NC}
   CloudPayments:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/cloudpayments${NC}
-
-${BOLD}Авторизация в панели:${NC}
-  ${CYAN}При первом входе в панель будут автоматически созданы${NC}
-  ${CYAN}логин и пароль администратора. Сохраните их!${NC}
-  ${CYAN}Также можно войти через PANEL_SECRET из .env файла.${NC}
-
-${YELLOW}⚠️  Не забудьте обновить Web App URL в BotFather:${NC}
-${CYAN}   https://${DOMAIN}${PORT_SUFFIX}${NC}
-
-${YELLOW}⚠️  Проверьте настройки в файле .env${NC}
 
 SUMMARY
