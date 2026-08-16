@@ -1448,25 +1448,66 @@ def refund_transaction(transaction_id: int):
             return (jsonify({'success': False, 'error': 'Возврат возможен только для пополнений'}), 400)
         if transaction['status'] == 'Refunded':
             return (jsonify({'success': False, 'error': 'Транзакция уже была возвращена'}), 400)
+        if transaction['status'] not in ('Success', 'Completed', 'Paid'):
+            return (jsonify({'success': False, 'error': f'Нельзя вернуть статус {transaction["status"]}'}), 400)
+
         amount = float(transaction['amount'])
+        if amount <= 0:
+            return (jsonify({'success': False, 'error': 'Некорректная сумма'}), 400)
         user_id = transaction['user_id']
-        payment_id = transaction['payment_id']
-        payment_provider = transaction['payment_provider']
+        payment_id = (transaction['payment_id'] or transaction['hash'] or '').strip()
+        payment_provider = (transaction['payment_provider'] or '').strip()
         refund_result = None
+
+        # Real money back via CloudPayments when we have TransactionId
+        is_cp = payment_provider.lower() in ('cloudpayments', 'cp', '') or 'cloud' in payment_provider.lower()
+        if payment_id and payment_id.isdigit() and (is_cp or not payment_provider or payment_provider.lower() == 'cloudpayments'):
+            refund_result = cloudpayments.cloudpayments_api.refund_payment(transaction_id=payment_id, amount=amount)
+            if not refund_result.get('ok'):
+                return (jsonify({
+                    'success': False,
+                    'error': refund_result.get('reason') or refund_result.get('error') or 'CloudPayments отказал в возврате',
+                }), 502)
+
         user = database.get_user_by_id(user_id)
-        if user:
-            current_balance = user.get('balance', 0)
-            new_balance = max(0, current_balance - amount)
-            cursor.execute('\n                UPDATE users SET balance = ? WHERE id = ?\n            ', (new_balance, user_id))
-        cursor.execute("\n            UPDATE transactions \n            SET status = 'Refunded', refunded_at = CURRENT_TIMESTAMP\n            WHERE id = ?\n        ", (transaction_id,))
-        cursor.execute("\n            INSERT INTO transactions (user_id, type, amount, status, payment_method, payment_provider, description)\n            VALUES (?, 'refund', ?, 'Success', ?, ?, ?)\n        ", (user_id, -amount, transaction['payment_method'], payment_provider, f'Возврат по транзакции #{transaction_id}'))
+        if user and transaction['type'] == 'deposit':
+            current_balance = float(user.get('balance', 0) or 0)
+            new_balance = max(0.0, current_balance - amount)
+            cursor.execute('UPDATE users SET balance = ? WHERE id = ?', (new_balance, user_id))
+
+        cursor.execute(
+            "UPDATE transactions SET status = 'Refunded' WHERE id = ?",
+            (transaction_id,),
+        )
+        cursor.execute(
+            """
+            INSERT INTO transactions (user_id, type, amount, status, payment_method, payment_provider, payment_id, description)
+            VALUES (?, 'refund', ?, 'Success', ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                -amount,
+                transaction['payment_method'],
+                payment_provider or 'CloudPayments',
+                payment_id or None,
+                f'Возврат CloudPayments по транзакции #{transaction_id}',
+            ),
+        )
         conn.commit()
         if transaction['telegram_id']:
-            core.send_notification_to_user(transaction['telegram_id'], f'💸 Возврат средств: {amount}₽ по транзакции #{transaction_id}')
+            core.send_notification_to_user(transaction['telegram_id'], f'💸 Возврат средств: {amount}₽ по операции #{transaction_id}')
         logger.info(f'Возврат по транзакции #{transaction_id}: {amount}₽ для user {user_id}')
-        return jsonify({'success': True, 'message': f'Возврат {amount}₽ выполнен успешно', 'refund_id': refund_result.get('id') if refund_result else None})
+        return jsonify({
+            'success': True,
+            'message': f'Возврат {amount}₽ выполнен',
+            'refund_id': (refund_result or {}).get('transaction_id'),
+        })
     except Exception as e:
         logger.error(f'Error refunding transaction {transaction_id}: {e}')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return (jsonify({'success': False, 'error': str(e)}), 500)
     finally:
         conn.close()
@@ -1751,7 +1792,7 @@ def get_panel_user_by_id(user_id: int):
         user_dict['referrals_count'] = cursor.fetchone()['cnt']
 
         cursor.execute("""
-            SELECT id, type, amount, status, payment_method, payment_provider, description, created_at
+            SELECT id, type, amount, status, payment_method, payment_provider, payment_id, description, created_at
             FROM transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
         """, (user_dict['id'],))
         user_dict['transactions'] = [dict(r) for r in cursor.fetchall()]
@@ -1762,6 +1803,15 @@ def get_panel_user_by_id(user_id: int):
             FROM vpn_keys WHERE user_id = ? ORDER BY created_at DESC
         """, (user_dict['id'],))
         user_dict['db_keys'] = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT id, payment_provider, payment_method_id, payment_method_type,
+                   card_last4, card_brand, is_active, created_at
+            FROM saved_payment_methods
+            WHERE user_id = ? AND is_active = 1
+            ORDER BY created_at DESC
+        """, (user_dict['id'],))
+        user_dict['payment_methods'] = [dict(r) for r in cursor.fetchall()]
 
         rw_data = []
         if telegram_id:
@@ -1794,6 +1844,15 @@ def get_panel_user_by_id(user_id: int):
         return jsonify(user_dict)
     finally:
         conn.close()
+
+
+@app.route('/api/panel/users/<int:user_id>/payment-methods/<int:method_id>', methods=['DELETE'])
+@require_auth
+def panel_unlink_payment_method(user_id: int, method_id: int):
+    ok = recurring_billing.deactivate_card_and_cancel_recurring(user_id, method_id)
+    if not ok:
+        return jsonify({'error': 'Карта не найдена или уже отвязана'}), 404
+    return jsonify({'success': True})
 
 
 @app.route('/api/panel/users/<int:user_id>/remnawave-devices', methods=['GET'])

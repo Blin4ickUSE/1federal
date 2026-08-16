@@ -6,6 +6,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, CallbackQuery
 from aiogram.enums import ParseMode
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramNetworkError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
 from src.database import database
 from src.core import core, abuse_detected
@@ -15,11 +17,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 WEB_APP_URL = os.getenv('MINIAPP_URL', '')
-SUPPORT_URL = os.getenv('SUPPORT_URL', 'https://t.me/onefederalbot')
+SUPPORT_URL = os.getenv('SUPPORT_URL', 'https://t.me/onefederal_support')
 if not BOT_TOKEN:
     logger.error('❌ TELEGRAM_BOT_TOKEN не указан в .env!')
     sys.exit(1)
-bot = Bot(token=BOT_TOKEN)
+# Longer timeout — api.telegram.org often slow from some VPS regions
+bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=120.0))
 dp = Dispatcher()
 
 def extract_referral_id(text: str) -> int:
@@ -29,12 +32,23 @@ def extract_referral_id(text: str) -> int:
     match = re.search('ref=(\\d+)', text)
     return int(match.group(1)) if match else None
 
+async def _answer_retry(message: types.Message, text: str, **kwargs):
+    last_err = None
+    for attempt in range(3):
+        try:
+            return await message.answer(text, **kwargs)
+        except TelegramNetworkError as e:
+            last_err = e
+            logger.warning('Telegram send timeout attempt=%s: %s', attempt + 1, e)
+            await asyncio.sleep(1.5 * (attempt + 1))
+    raise last_err
+
 @dp.message(CommandStart())
 
 async def cmd_start(message: types.Message):
     telegram_id = message.from_user.id
     if core.check_blacklist(telegram_id):
-        await message.answer('❌ Ваш аккаунт заблокирован.')
+        await _answer_retry(message, '❌ Ваш аккаунт заблокирован.')
         return
     referral_id = None
     if message.text and 'ref' in message.text:
@@ -67,14 +81,23 @@ async def cmd_start(message: types.Message):
                 logger.warning(f'Referral rate limit exceeded for referrer {referral_id}')
     ban_status = abuse_detected.check_user_ban_status(user['id'])
     if ban_status.get('banned'):
-        await message.answer('❌ Ваш аккаунт заблокирован.\n\nЕсли вы считаете, что это ошибка, свяжитесь со службой поддержки.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Служба поддержки', url=SUPPORT_URL)]]))
+        await _answer_retry(
+            message,
+            '❌ Ваш аккаунт заблокирован.\n\nЕсли вы считаете, что это ошибка, свяжитесь со службой поддержки.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Служба поддержки', url=SUPPORT_URL)]]),
+        )
         return
 
-    text = '<tg-emoji emoji-id="6028346797368283073">✈️</tg-emoji> Привет, мы — 1FEDERAL VPN!\n\nБезопасный VPN, который использует новейшие технологии для обхода блокировок и безопасности в интернете.\n\nНажми на кнопку, чтобы начать <tg-emoji emoji-id="5305522282695768654">👇</tg-emoji>'
+    # Plain HTML — custom emoji often causes slow/failed sendMessage on bad networks
+    text = (
+        '✈️ <b>Привет, мы — 1FEDERAL VPN!</b>\n\n'
+        'Безопасный VPN с современными протоколами для обхода блокировок.\n\n'
+        'Нажми кнопку ниже, чтобы начать 👇'
+    )
     keyboard = None
     if WEB_APP_URL:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]])
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await _answer_retry(message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 withdrawal_reject_states = {}
 

@@ -16,12 +16,28 @@ const rawEnvMini: any =
   {};
 
 const API_BASE_URL_MINI: string = rawEnvMini.VITE_API_URL || rawEnvMini.REACT_APP_API_URL || '/api';
-const SUPPORT_URL: string = rawEnvMini.VITE_SUPPORT_URL || rawEnvMini.REACT_APP_SUPPORT_URL || 'https://t.me/onefederalbot';
+const SUPPORT_URL: string = rawEnvMini.VITE_SUPPORT_URL || rawEnvMini.REACT_APP_SUPPORT_URL || 'https://t.me/onefederal_support';
 const BOT_USERNAME_MINI: string = rawEnvMini.VITE_BOT_USERNAME || rawEnvMini.REACT_APP_BOT_USERNAME || 'onefederalbot';
 const APP_NAME = '1FEDERAL VPN';
 const MIN_REFERRAL_WITHDRAW_RUB = 200;
 const MAX_REFERRAL_WITHDRAW_RUB = 5000;
 const MINIAPP_SESSION_KEY = 'miniapp_session_token';
+
+function openSupportChat() {
+  const url = SUPPORT_URL.startsWith('http') ? SUPPORT_URL : `https://t.me/${String(SUPPORT_URL).replace(/^@/, '')}`;
+  try {
+    const tg = (window as any).Telegram?.WebApp;
+    if (typeof tg?.openTelegramLink === 'function') {
+      tg.openTelegramLink(url);
+      return;
+    }
+    if (typeof tg?.openLink === 'function') {
+      tg.openLink(url);
+      return;
+    }
+  } catch {}
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
 
 interface TelegramWidgetUser {
   id: number;
@@ -752,16 +768,13 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authTab, setAuthTab] = useState<'email' | 'telegram'>('email');
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [emailInput, setEmailInput] = useState('');
-  const [passwordInput, setPasswordInput] = useState('');
   const [otpInput, setOtpInput] = useState('');
-  const [otpPurpose, setOtpPurpose] = useState<'login' | 'register' | 'link' | 'change' | 'unlink' | 'merge' | null>(null);
+  const [otpPurpose, setOtpPurpose] = useState<'login' | 'link' | 'change' | 'unlink' | 'merge' | null>(null);
   const [otpEmail, setOtpEmail] = useState('');
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [pendingLink, setPendingLink] = useState<PendingLinkPayload | null>(null);
   const [linkEmail, setLinkEmail] = useState('');
-  const [linkPassword, setLinkPassword] = useState('');
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsMsg, setSettingsMsg] = useState<string | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
@@ -1054,13 +1067,12 @@ export default function App() {
     setAuthLoading(true);
     setAuthError(null);
     try {
-      const path = authMode === 'register' ? '/auth/email/register' : '/auth/email/login';
-      const data = await miniApiFetch(path, {
+      const data = await miniApiFetch('/auth/email/start', {
         method: 'POST',
-        body: JSON.stringify({ email: emailInput.trim(), password: passwordInput }),
+        body: JSON.stringify({ email: emailInput.trim() }),
       });
       if (data?.error) throw new Error(data.error);
-      setOtpPurpose(authMode);
+      setOtpPurpose('login');
       setOtpEmail(emailInput.trim().toLowerCase());
       setOtpInput('');
     } catch (e: any) {
@@ -1071,13 +1083,13 @@ export default function App() {
   };
 
   const verifyEmailOtp = async () => {
-    if (!otpPurpose || (otpPurpose !== 'login' && otpPurpose !== 'register')) return;
+    if (otpPurpose !== 'login') return;
     setAuthLoading(true);
     setAuthError(null);
     try {
       const data = await miniApiFetch('/auth/email/verify', {
         method: 'POST',
-        body: JSON.stringify({ email: otpEmail, code: otpInput.trim(), purpose: otpPurpose }),
+        body: JSON.stringify({ email: otpEmail, code: otpInput.trim(), purpose: 'login' }),
       });
       if (data?.error) throw new Error(data.error);
       if (!data?.session_token) throw new Error('Нет токена сессии');
@@ -1154,7 +1166,7 @@ export default function App() {
     try {
       const data = await miniApiFetch('/auth/email/link/start', {
         method: 'POST',
-        body: JSON.stringify({ email: linkEmail.trim(), password: linkPassword }),
+        body: JSON.stringify({ email: linkEmail.trim() }),
       });
       if (data?.error) throw new Error(data.error);
       if (data?.conflict && data.pending_link) {
@@ -2846,7 +2858,7 @@ export default function App() {
           {paymentChecking ? 'Проверка оплаты...' : 'Автоматическая проверка каждые 3 сек.'}
         </div>
         <button
-          onClick={() => window.open(SUPPORT_URL, '_blank')}
+          onClick={() => openSupportChat()}
           className="mt-4 text-blue-500 text-sm hover:text-blue-300 font-medium flex items-center gap-2"
         >
           <MessageCircle size={16} /> Связаться с поддержкой
@@ -3102,14 +3114,13 @@ export default function App() {
         <div className="rounded-2xl bg-zinc-900/80 border border-zinc-800 p-4 space-y-3">
           <div className="text-sm font-medium text-white">{userEmail ? 'Сменить почту' : 'Привязать почту'}</div>
           <input className="w-full bg-black/40 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm" type="email" placeholder="Email" value={linkEmail} onChange={e => setLinkEmail(e.target.value)} />
-          <input className="w-full bg-black/40 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm" type="password" placeholder="Пароль" value={linkPassword} onChange={e => setLinkPassword(e.target.value)} />
           {(otpPurpose === 'link' || otpPurpose === 'change') ? (
             <>
               <input className="w-full bg-black/40 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm tracking-widest text-center" placeholder="Код из письма" value={otpInput} onChange={e => setOtpInput(e.target.value)} />
               <Button onClick={confirmLinkEmail} disabled={settingsBusy}>Подтвердить</Button>
             </>
           ) : (
-            <Button onClick={startLinkEmail} disabled={settingsBusy || !linkEmail || linkPassword.length < 8}>Отправить код</Button>
+            <Button onClick={startLinkEmail} disabled={settingsBusy || !linkEmail.trim()}>Отправить код</Button>
           )}
         </div>
 
@@ -3136,7 +3147,7 @@ export default function App() {
           </div>
         )}
 
-        <button type="button" onClick={() => window.open(SUPPORT_URL, '_blank')} className="w-full flex items-center justify-between rounded-2xl bg-zinc-900/80 border border-zinc-800 p-4 text-sm text-white">
+        <button type="button" onClick={() => openSupportChat()} className="w-full flex items-center justify-between rounded-2xl bg-zinc-900/80 border border-zinc-800 p-4 text-sm text-white">
           <span className="flex items-center gap-2"><MessageCircle size={16} /> Поддержка</span>
           <ExternalLink size={14} className="text-slate-500" />
         </button>
@@ -3247,30 +3258,26 @@ export default function App() {
             </div>
             <h1 className="text-2xl font-bold text-white mb-2">{APP_NAME}</h1>
             <p className="text-slate-400 mb-6 leading-relaxed">
-              Войдите по email или через Telegram
+              Введите email — пришлём код для входа
             </p>
 
             <div className="flex rounded-xl bg-zinc-900 p-1 mb-5">
-              <button type="button" onClick={() => setAuthTab('email')} className={`flex-1 py-2 rounded-lg text-sm font-medium ${authTab === 'email' ? 'bg-white/10 text-white' : 'text-slate-500'}`}>Email</button>
-              <button type="button" onClick={() => setAuthTab('telegram')} className={`flex-1 py-2 rounded-lg text-sm font-medium ${authTab === 'telegram' ? 'bg-white/10 text-white' : 'text-slate-500'}`}>Telegram</button>
+              <button type="button" onClick={() => { setAuthTab('email'); setOtpPurpose(null); }} className={`flex-1 py-2 rounded-lg text-sm font-medium ${authTab === 'email' ? 'bg-white/10 text-white' : 'text-slate-500'}`}>Email</button>
+              <button type="button" onClick={() => { setAuthTab('telegram'); setOtpPurpose(null); }} className={`flex-1 py-2 rounded-lg text-sm font-medium ${authTab === 'telegram' ? 'bg-white/10 text-white' : 'text-slate-500'}`}>Telegram</button>
             </div>
 
             {authTab === 'email' ? (
               <div className="text-left space-y-3">
-                <div className="flex rounded-xl bg-zinc-900 p-1 mb-1">
-                  <button type="button" onClick={() => { setAuthMode('login'); setOtpPurpose(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${authMode === 'login' ? 'bg-white/10 text-white' : 'text-slate-500'}`}>Вход</button>
-                  <button type="button" onClick={() => { setAuthMode('register'); setOtpPurpose(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${authMode === 'register' ? 'bg-white/10 text-white' : 'text-slate-500'}`}>Регистрация</button>
-                </div>
-                <input className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500" type="email" placeholder="Email" value={emailInput} onChange={e => setEmailInput(e.target.value)} />
-                <input className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500" type="password" placeholder="Пароль (мин. 8)" value={passwordInput} onChange={e => setPasswordInput(e.target.value)} />
-                {(otpPurpose === 'login' || otpPurpose === 'register') && (
-                  <input className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500 tracking-widest text-center" type="text" inputMode="numeric" placeholder="Код из письма" value={otpInput} onChange={e => setOtpInput(e.target.value)} />
-                )}
-                {(otpPurpose === 'login' || otpPurpose === 'register') ? (
-                  <Button className="w-full" onClick={verifyEmailOtp} disabled={authLoading || otpInput.trim().length < 4}>Подтвердить код</Button>
+                <input className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500" type="email" placeholder="Email" value={emailInput} onChange={e => setEmailInput(e.target.value)} disabled={otpPurpose === 'login'} />
+                {otpPurpose === 'login' ? (
+                  <>
+                    <input className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500 tracking-widest text-center" type="text" inputMode="numeric" placeholder="Код из письма" value={otpInput} onChange={e => setOtpInput(e.target.value)} />
+                    <Button className="w-full" onClick={verifyEmailOtp} disabled={authLoading || otpInput.trim().length < 4}>Войти</Button>
+                    <button type="button" className="w-full text-xs text-slate-500 py-1" onClick={() => { setOtpPurpose(null); setOtpInput(''); }}>Другой email</button>
+                  </>
                 ) : (
-                  <Button className="w-full" onClick={submitEmailAuth} disabled={authLoading || !emailInput || passwordInput.length < 8}>
-                    {authMode === 'register' ? 'Зарегистрироваться' : 'Войти'}
+                  <Button className="w-full" onClick={submitEmailAuth} disabled={authLoading || !emailInput.trim()}>
+                    Получить код
                   </Button>
                 )}
               </div>

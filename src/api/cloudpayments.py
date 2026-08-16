@@ -129,6 +129,51 @@ class CloudPaymentsAPI:
             logger.error('CP token charge error: %s', exc)
             return {'ok': False, 'error': str(exc)}
 
+    def refund_payment(
+        self,
+        *,
+        transaction_id: str | int,
+        amount: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Refund a CloudPayments payment by TransactionId (full or partial)."""
+        if not self.is_configured:
+            return {'ok': False, 'error': 'CloudPayments is not configured'}
+        try:
+            tx_id = int(str(transaction_id).strip())
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'Invalid TransactionId'}
+
+        payload: Dict[str, Any] = {'TransactionId': tx_id}
+        if amount is not None:
+            payload['Amount'] = round(float(amount), 2)
+
+        url = f'{self.api_url}/payments/refund'
+        try:
+            response = requests.post(url, headers=self._headers(), json=payload, timeout=40)
+            parsed: Optional[Dict[str, Any]] = None
+            if response.content:
+                try:
+                    parsed = response.json()
+                except Exception:
+                    parsed = None
+            if not isinstance(parsed, dict):
+                logger.error('CP refund unexpected: %s', (response.text or '')[:500])
+                return {'ok': False, 'error': 'unexpected response', 'raw': response.text}
+            success = bool(parsed.get('Success'))
+            model = parsed.get('Model') if isinstance(parsed.get('Model'), dict) else {}
+            logger.info('CP refund tx=%s success=%s amount=%s', tx_id, success, amount)
+            return {
+                'ok': success,
+                'success': success,
+                'transaction_id': str(model.get('TransactionId') or tx_id),
+                'reason': parsed.get('Message') or model.get('Reason'),
+                'model': model,
+                'response': parsed,
+            }
+        except requests.exceptions.RequestException as exc:
+            logger.error('CP refund error: %s', exc)
+            return {'ok': False, 'error': str(exc)}
+
     def create_order(
         self,
         *,

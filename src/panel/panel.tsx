@@ -52,7 +52,11 @@ interface DBUser {
   partner_rate: number; partner_balance: number; total_earned: number;
   is_partner: number; is_banned: number; ban_reason: string | null;
   referral_withdraw_blocked: number; in_blacklist: boolean; referrals_count: number;
-  transactions: DBTransaction[]; db_keys: DBKey[]; remnawave_keys: RWKey[];
+  transactions: DBTransaction[]; db_keys: DBKey[];   remnawave_keys: RWKey[];
+  payment_methods?: Array<{
+    id: number; payment_provider: string; payment_method_id: string;
+    payment_method_type?: string; card_last4?: string; card_brand?: string; created_at?: string;
+  }>;
 }
 
 interface DBTransaction {
@@ -321,7 +325,7 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
   useEffect(() => { apiFetch('/panel/finance/stats').then(d => d && setStats(d)).catch(console.error); }, []);
   return (
     <div className="flex flex-col gap-6 rise">
-      <div><div className="h-page">Финансы</div><div className="sub mt-1">Доходы и операции</div></div>
+      <div><div className="h-page">Финансы</div><div className="sub mt-1">Доходы, операции и возвраты CloudPayments</div></div>
       <div className="grid grid-cols-2 gap-4">
         <Stat title="Пополнения" value={stats ? fmtM(stats.deposits) : '—'} icon={ArrowUpRight} />
         <Stat title="Успешные операции" value={stats ? fmtN(stats.successfulOps) : '—'} icon={Activity} sub="операций" />
@@ -351,17 +355,44 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
 };
 
 // ─── TRANSACTION MODAL ───────────────────────────────────────────
-const TransactionModal: React.FC<{ tx: any; onClose: () => void }> = ({ tx, onClose }) => (
-  <Modal onClose={onClose} title={tx.amount > 0 ? 'Пополнение' : 'Списание'} icon={tx.amount > 0 ? ArrowUpRight : ArrowDownLeft} width={420}
-    footer={<button className="btn block" onClick={onClose}>Закрыть</button>}>
-    {[['ID', `#${tx.id}`], ['Пользователь', tx.user], ['Сумма', `${tx.amount > 0 ? '+' : ''}${tx.amount} ₽`], ['Метод', tx.method || '—'], ['Hash', tx.hash || '—'], ['Дата', tx.date]].map(([l, v]) => (
-      <div key={String(l)} className="flex justify-between items-center" style={{ padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
-        <span className="muted" style={{ fontSize: 13 }}>{l}</span>
-        <span className="mono" style={{ fontSize: 13 }}>{v}</span>
-      </div>
-    ))}
-  </Modal>
-);
+const TransactionModal: React.FC<{ tx: any; onClose: () => void; onRefunded?: () => void; onToast?: (t: string, m?: string, ty?: ToastType) => void }> = ({ tx, onClose, onRefunded, onToast }) => {
+  const [busy, setBusy] = useState(false);
+  const canRefund = tx.amount > 0 && String(tx.status).toLowerCase() === 'success' && (tx.type === 'deposit' || !tx.type);
+
+  const doRefund = async () => {
+    if (!canRefund || !confirm(`Вернуть ${tx.amount}₽ через CloudPayments?`)) return;
+    setBusy(true);
+    try {
+      const d = await apiFetch(`/panel/transactions/${tx.id}/refund`, { method: 'POST' });
+      onToast?.(d?.message || 'Возврат выполнен');
+      onRefunded?.();
+      onClose();
+    } catch (e: any) {
+      onToast?.('Ошибка возврата', e?.message || String(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title={tx.amount > 0 ? 'Пополнение' : 'Списание'} icon={tx.amount > 0 ? ArrowUpRight : ArrowDownLeft} width={420}
+      footer={<>
+        {canRefund && (
+          <button className="btn block danger" disabled={busy} onClick={doRefund}>
+            {busy ? <Spinner size={14} /> : 'Вернуть через CloudPayments'}
+          </button>
+        )}
+        <button className="btn block" onClick={onClose}>Закрыть</button>
+      </>}>
+      {[['ID', `#${tx.id}`], ['Пользователь', tx.user], ['Сумма', `${tx.amount > 0 ? '+' : ''}${tx.amount} ₽`], ['Статус', tx.status], ['Метод', tx.method || '—'], ['Payment ID', tx.hash || tx.payment_id || '—'], ['Дата', tx.date]].map(([l, v]) => (
+        <div key={String(l)} className="flex justify-between items-center" style={{ padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
+          <span className="muted" style={{ fontSize: 13 }}>{l}</span>
+          <span className="mono" style={{ fontSize: 13 }}>{v}</span>
+        </div>
+      ))}
+    </Modal>
+  );
+};
 
 // ─── STATISTICS ───────────────────────────────────────────────────
 const StatisticsPage: React.FC = () => {
@@ -872,25 +903,85 @@ const UserDetailPage: React.FC<{
 
       {/* ── PAYMENTS TAB ── */}
       {activeTab === 'payments' && (
-        <div className="tbl-wrap">
-          <table className="tbl">
-            <thead><tr><th>ID</th><th>Тип</th><th>Сумма</th><th>Статус</th><th>Метод</th><th>Описание</th><th>Дата</th></tr></thead>
-            <tbody>
-              {user.transactions.length === 0
-                ? <tr className="empty-row"><td colSpan={7}>Нет операций</td></tr>
-                : user.transactions.map(tx => (
-                  <tr key={tx.id}>
-                    <td className="muted mono">#{tx.id}</td>
-                    <td className="faint" style={{ fontSize: 12 }}>{tx.type}</td>
-                    <td style={{ fontWeight: 600, color: tx.amount > 0 ? 'var(--text)' : 'var(--muted)' }}>{tx.amount > 0 ? '+' : ''}{tx.amount} ₽</td>
-                    <td><span className={`badge ${tx.status === 'Success' ? 'solid' : tx.status === 'Pending' ? 'mute' : 'danger'}`}>{tx.status}</span></td>
-                    <td className="muted">{tx.payment_provider || tx.payment_method || '—'}</td>
-                    <td className="faint" style={{ fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description || '—'}</td>
-                    <td className="faint">{fmtDateShort(tx.created_at)}</td>
-                  </tr>
+        <div className="flex flex-col gap-4">
+          <div className="card" style={{ padding: 20 }}>
+            <h3 className="h-sec mb-3">Привязанные карты</h3>
+            {(user.payment_methods || []).length === 0 ? (
+              <p className="muted" style={{ fontSize: 13 }}>Нет сохранённых карт</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {(user.payment_methods || []).map(pm => (
+                  <div key={pm.id} className="inset flex items-center justify-between gap-3" style={{ padding: 12 }}>
+                    <div>
+                      <div style={{ fontWeight: 500 }}>{pm.card_brand || 'Карта'} •••• {pm.card_last4 || '????'}</div>
+                      <div className="faint" style={{ fontSize: 11 }}>{pm.payment_provider} · id {pm.id}</div>
+                    </div>
+                    <button
+                      className="btn sm danger"
+                      disabled={saving === `unlink_card_${pm.id}`}
+                      onClick={async () => {
+                        if (!confirm('Отвязать карту и отменить автосписания?')) return;
+                        setSaving(`unlink_card_${pm.id}`);
+                        try {
+                          await apiFetch(`/panel/users/${user.id}/payment-methods/${pm.id}`, { method: 'DELETE' });
+                          onToast('Карта отвязана');
+                          await reload();
+                        } catch (e: any) {
+                          onToast('Ошибка', e.message, 'error');
+                        }
+                        setSaving(null);
+                      }}
+                    >
+                      {saving === `unlink_card_${pm.id}` ? <Spinner size={12} /> : <><Unlink size={12} /> Отвязать</>}
+                    </button>
+                  </div>
                 ))}
-            </tbody>
-          </table>
+              </div>
+            )}
+          </div>
+
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead><tr><th>ID</th><th>Тип</th><th>Сумма</th><th>Статус</th><th>Метод</th><th>Описание</th><th>Дата</th><th></th></tr></thead>
+              <tbody>
+                {user.transactions.length === 0
+                  ? <tr className="empty-row"><td colSpan={8}>Нет операций</td></tr>
+                  : user.transactions.map(tx => (
+                    <tr key={tx.id}>
+                      <td className="muted mono">#{tx.id}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{tx.type}</td>
+                      <td style={{ fontWeight: 600, color: tx.amount > 0 ? 'var(--text)' : 'var(--muted)' }}>{tx.amount > 0 ? '+' : ''}{tx.amount} ₽</td>
+                      <td><span className={`badge ${tx.status === 'Success' ? 'solid' : tx.status === 'Pending' ? 'mute' : 'danger'}`}>{tx.status}</span></td>
+                      <td className="muted">{tx.payment_provider || tx.payment_method || '—'}</td>
+                      <td className="faint" style={{ fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description || '—'}</td>
+                      <td className="faint">{fmtDateShort(tx.created_at)}</td>
+                      <td>
+                        {tx.type === 'deposit' && tx.status === 'Success' && tx.amount > 0 && (
+                          <button
+                            className="btn sm danger"
+                            disabled={saving === `refund_${tx.id}`}
+                            onClick={async () => {
+                              if (!confirm(`Вернуть ${tx.amount}₽ через CloudPayments?`)) return;
+                              setSaving(`refund_${tx.id}`);
+                              try {
+                                const d = await apiFetch(`/panel/transactions/${tx.id}/refund`, { method: 'POST' });
+                                onToast(d?.message || 'Возврат выполнен');
+                                await reload();
+                              } catch (e: any) {
+                                onToast('Ошибка возврата', e.message, 'error');
+                              }
+                              setSaving(null);
+                            }}
+                          >
+                            {saving === `refund_${tx.id}` ? <Spinner size={12} /> : 'Возврат'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -1425,20 +1516,26 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     apiFetch('/panel/stats/summary').then(d => { if (d) setTotalRevenue(d.monthly_revenue || 0); }).catch(() => {});
   }, []);
 
+  const loadFinance = useCallback(() => {
+    apiFetch('/panel/transactions').then(d => {
+      const raw = Array.isArray(d) ? d : (d?.transactions || []);
+      setTransactions(raw.map((tx: any) => ({
+        id: tx.id,
+        user: tx.user || tx.username || tx.telegram_id || '—',
+        amount: tx.amount || 0,
+        type: tx.type || (tx.amount > 0 ? 'deposit' : 'expense'),
+        status: tx.status || '—',
+        method: tx.payment_method || tx.payment_provider || '—',
+        date: tx.created_at ? new Date(tx.created_at).toLocaleDateString('ru-RU') : '—',
+        hash: tx.hash || tx.payment_id || '',
+        payment_id: tx.payment_id || tx.hash || '',
+      })));
+    }).catch(console.error);
+  }, []);
+
   useEffect(() => {
-    if (activePage === 'Финансы') {
-      apiFetch('/panel/transactions').then(d => {
-        const raw = Array.isArray(d) ? d : (d?.transactions || []);
-        setTransactions(raw.map((tx: any) => ({
-          id: tx.id, user: tx.username || tx.telegram_id || '—',
-          amount: tx.amount || 0, type: tx.amount > 0 ? 'income' : 'expense',
-          status: tx.status || '—', method: tx.payment_method || tx.payment_provider || '—',
-          date: tx.created_at ? new Date(tx.created_at).toLocaleDateString('ru-RU') : '—',
-          hash: tx.hash || '',
-        })));
-      }).catch(console.error);
-    }
-  }, [activePage]);
+    if (activePage === 'Финансы') loadFinance();
+  }, [activePage, loadFinance]);
 
   // ?uid=internal_user_id | ?tg=telegram_id (never ambiguous ?user=)
   useEffect(() => {
@@ -1557,7 +1654,19 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           ) : (
             <>
               {activePage === 'Главная' && <Dashboard onNavigate={(page) => { setActivePage(page); closeUser(); }} />}
-              {activePage === 'Финансы' && <><FinancePage transactions={transactions} onSelect={setSelectedTx} />{selectedTx && <TransactionModal tx={selectedTx} onClose={() => setSelectedTx(null)} />}</>}
+              {activePage === 'Финансы' && (
+                <>
+                  <FinancePage transactions={transactions} onSelect={setSelectedTx} />
+                  {selectedTx && (
+                    <TransactionModal
+                      tx={selectedTx}
+                      onClose={() => setSelectedTx(null)}
+                      onRefunded={loadFinance}
+                      onToast={addToast}
+                    />
+                  )}
+                </>
+              )}
               {activePage === 'Статистика' && <StatisticsPage />}
               {activePage === 'Пользователи' && <UsersPage onOpenUser={openUser} />}
               {activePage === 'Ключи' && <KeysPage onToast={addToast} />}
