@@ -292,13 +292,7 @@ def notify_admin_about_deposit(user: Dict, amount: float, method: str, provider:
     telegram_id = user.get('telegram_id') or '—'
     email = user.get('email') or '—'
     message = (
-        f'💰 <b>Пополнение баланса</b>\n\n'
-        f'👤 Пользователь: @{username}\n'
-        f'🆔 Telegram ID: {telegram_id}\n'
-        f'📧 Email: {email}\n'
-        f'💵 Сумма: {amount}₽\n'
-        f'💳 Способ: {method}\n'
-        f'🏦 Провайдер: {provider}'
+        f'💰 <b>Пополнение баланса</b> от @{username} ({telegram_id} / {email}) на {amount}₽ через {method}'
     )
     core.send_notification_to_admin(message)
 
