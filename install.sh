@@ -364,7 +364,7 @@ if [[ -f "$NGINX_CONF" ]]; then
     log_success "✔ Репозиторий обновлён."
     log_info "\nШаг 2: пересборка и перезапуск контейнеров"
     sudo docker-compose down --remove-orphans
-    sudo docker-compose up -d --build
+    sudo docker-compose up -d --build --force-recreate --remove-orphans
     log_success "\n🎉 Обновление успешно завершено!"
     exit 0
 fi
@@ -518,9 +518,9 @@ mkdir -p data
 chmod 755 data
 
 if [[ -n "$(sudo docker-compose ps -q 2>/dev/null)" ]]; then
-    sudo docker-compose down
+    sudo docker-compose down --remove-orphans
 fi
-sudo docker-compose up -d --build
+sudo docker-compose up -d --build --force-recreate --remove-orphans
 
 PORT_SUFFIX=""
 if [[ "$SSL_PORT" != "443" ]]; then
