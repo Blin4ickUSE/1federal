@@ -97,8 +97,17 @@ async def cmd_start(message: types.Message):
     keyboard = None
     if WEB_APP_URL:
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]]
-        )
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='Открыть приложение',
+                web_app=WebAppInfo(url=WEB_APP_URL),
+                style='primary',  # делает кнопку синей (акцентной)
+                icon_custom_emoji_id='5271798242437271661',  # ID премиум эмодзи
+            )
+        ]
+    ]
+)
     
     # Меняем ParseMode.HTML на ParseMode.MARKDOWN_V2
     await _answer_retry(message, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
