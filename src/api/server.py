@@ -2622,7 +2622,24 @@ def get_stats_summary():
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         cursor.execute("\n            SELECT COALESCE(SUM(amount), 0) AS total\n            FROM transactions\n            WHERE type = 'deposit'\n              AND created_at >= ?\n              AND status = 'Success'\n            ", (month_start.isoformat(),))
         monthly_revenue = float(cursor.fetchone()['total'] or 0)
-        return jsonify({'total_users': total_users, 'active_keys': active_keys, 'monthly_revenue': monthly_revenue})
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS total
+            FROM transactions
+            WHERE type = 'deposit'
+              AND created_at >= ?
+              AND status = 'Success'
+            """,
+            (day_start.isoformat(),),
+        )
+        today_revenue = float(cursor.fetchone()['total'] or 0)
+        return jsonify({
+            'total_users': total_users,
+            'active_keys': active_keys,
+            'monthly_revenue': monthly_revenue,
+            'today_revenue': today_revenue,
+        })
     finally:
         conn.close()
 

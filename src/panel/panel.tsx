@@ -265,95 +265,52 @@ function LoginForm({ onLogin }: { onLogin: (s: string) => void }) {
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────
-const Dashboard: React.FC = () => {
+const Dashboard: React.FC<{ onNavigate: (page: string) => void }> = ({ onNavigate }) => {
   const [summary, setSummary] = useState<any>(null);
-  const [stats, setStats] = useState<any>(null);
-  const [period, setPeriod] = useState<'7' | '30' | '365'>('30');
 
   useEffect(() => {
     apiFetch('/panel/stats/summary').then(d => d && setSummary(d)).catch(console.error);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    apiFetch(`/panel/statistics/full?period=${period}`).then(d => { if (!cancelled && d) setStats(d); }).catch(console.error);
-    return () => { cancelled = true; };
-  }, [period]);
-
   const fmtM2 = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M ₽` : fmtM(v);
-
-  const revenueSeries = (() => {
-    const raw = stats?.revenueByDay ?? stats?.dailyRevenue ?? stats?.revenue_by_day ?? stats?.chart ?? [];
-    const labels = stats?.revenueLabels ?? [];
-    if (!Array.isArray(raw)) return [];
-    if (raw.length > 0 && typeof raw[0] === 'number')
-      return raw.map((v: number, i: number) => ({ label: labels[i] || String(i + 1), value: v }));
-    return raw.map((d: any) => ({
-      label: String(d.label ?? d.date ?? d.day ?? ''),
-      value: Number(d.value ?? d.amount ?? d.revenue ?? d.total ?? d.count ?? 0) || 0,
-    }));
-  })();
 
   return (
     <div className="flex flex-col gap-6 rise">
-      <div><div className="h-page">Панель управления</div><div className="sub mt-1">Обзор 1FEDERAL VPN</div></div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div>
+        <div className="h-page">Панель управления</div>
+        <div className="sub mt-1">Краткий обзор 1FEDERAL VPN</div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <Stat title="Пользователи" value={summary ? fmtN(summary.total_users) : '—'} icon={Users} />
         <Stat title="Активные ключи" value={summary ? fmtN(summary.active_keys) : '—'} icon={Key} />
         <Stat title="Доход за месяц" value={summary ? fmtM2(summary.monthly_revenue) : '—'} icon={DollarSign} />
-        <Stat title="Платежей сегодня" value={stats ? fmtN(stats.paymentsToday) : '—'} icon={CreditCard} />
+        <Stat title="Доход за сегодня" value={summary ? fmtM2(summary.today_revenue ?? 0) : '—'} icon={CreditCard} />
       </div>
-      {stats && (
-        <>
-          <div className="card" style={{ padding: 24 }}>
-            <div className="flex justify-between items-center mb-5">
-              <h3 className="h-sec">Выручка</h3>
-              <div className="seg">
-                {([['7', 'Неделя'], ['30', '30 дней'], ['365', 'Год']] as const).map(([v, l]) => (
-                  <button key={v} className={`seg-item ${period === v ? 'on' : ''}`} onClick={() => setPeriod(v)}>{l}</button>
-                ))}
-              </div>
-            </div>
-            {revenueSeries.length > 0 && <BarChart data={revenueSeries} format={v => fmtM2(v)} height={180} />}
-            <div className="grid grid-cols-3 gap-3 mt-6">
-              <div className="inset" style={{ padding: 14 }}><div className="sub">В среднем в день</div><div className="stat-value mt-1">{fmtM2(stats.avgDaily || 0)}</div></div>
-              <div className="inset" style={{ padding: 14 }}><div className="sub">Лучший день</div><div className="stat-value mt-1">{fmtM2(stats.bestDayValue || 0)}</div><div className="faint" style={{ fontSize: 11 }}>{stats.bestDayDate || ''}</div></div>
-              <div className="inset" style={{ padding: 14 }}><div className="sub">Куплено за неделю</div><div className="stat-value mt-1">+{fmtN(stats.boughtThisWeek)}</div></div>
-            </div>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="card" style={{ padding: 20 }}>
-              <h3 className="h-sec mb-4">Подписки</h3>
-              {[['Всего', stats.totalSubscriptions], ['Платные', stats.paidSubscriptions], ['За неделю', `+${fmtN(stats.boughtThisWeek)}`]].map(([l, v]) => (
-                <div key={String(l)} className="flex justify-between" style={{ fontSize: 14, padding: '5px 0' }}><span className="muted">{l}</span><span style={{ fontWeight: 500 }}>{typeof v === 'number' ? fmtN(v) : v}</span></div>
-              ))}
-            </div>
-            <div className="card" style={{ padding: 20 }}>
-              <h3 className="h-sec mb-3">Конверсия trial → paid</h3>
-              <div className="stat-value" style={{ fontSize: 32 }}>{stats.conversionRate?.toFixed(1) || 0}%</div>
-              <div className="hbar mt-3"><i style={{ width: `${Math.min(stats.conversionRate || 0, 100)}%`, background: 'var(--text)' }} /></div>
-            </div>
-            <div className="card" style={{ padding: 20 }}>
-              <h3 className="h-sec mb-4">Рефералы</h3>
-              {[['Приглашено', fmtN(stats.totalInvited)], ['Партнёров', fmtN(stats.partners)], ['Выплачено', fmtM2(stats.totalPaid)]].map(([l, v]) => (
-                <div key={String(l)} className="flex justify-between" style={{ fontSize: 14, padding: '5px 0' }}><span className="muted">{l}</span><span style={{ fontWeight: 500 }}>{v}</span></div>
-              ))}
-            </div>
-          </div>
-          <div className="tbl-wrap">
-            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)' }}><h3 className="h-sec">Топ рефералов</h3></div>
-            <table className="tbl">
-              <thead><tr><th>Пользователь</th><th>Пригласил</th><th>Заработал</th></tr></thead>
-              <tbody>
-                {(stats.topReferrers || []).map((r: any) => (
-                  <tr key={r.id}><td><span className="flex items-center gap-2"><Trophy size={13} className="faint" />{r.name}</span></td><td className="muted">{r.count} чел.</td><td style={{ fontWeight: 500 }}>{fmtM(r.earned)}</td></tr>
-                ))}
-                {(!stats.topReferrers || !stats.topReferrers.length) && <tr className="empty-row"><td colSpan={3}>Нет данных</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
+
+      <div className="card" style={{ padding: 20 }}>
+        <h3 className="h-sec mb-3">Быстрые разделы</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {[
+            { page: 'Статистика', desc: 'Выручка, конверсия, рефералы', icon: BarChart2 },
+            { page: 'Пользователи', desc: 'Поиск и управление аккаунтами', icon: Users },
+            { page: 'Финансы', desc: 'Платежи и операции', icon: DollarSign },
+          ].map(item => (
+            <button
+              key={item.page}
+              className="btn"
+              style={{ justifyContent: 'flex-start', textAlign: 'left', height: 'auto', padding: 14, whiteSpace: 'normal' }}
+              onClick={() => onNavigate(item.page)}
+            >
+              <item.icon size={16} className="faint" style={{ flexShrink: 0 }} />
+              <span>
+                <div style={{ fontWeight: 600 }}>{item.page}</div>
+                <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>{item.desc}</div>
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 };
@@ -455,9 +412,9 @@ const StatisticsPage: React.FC = () => {
         <Stat title="Баланс клиентов" value={fmtM2(stats.clientsBalance)} icon={Wallet} />
       </div>
       <div className="card" style={{ padding: 24 }}>
-        <div className="flex justify-between items-center mb-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-5">
           <h3 className="h-sec">Выручка по дням</h3>
-          <div className="seg">
+          <div className="seg" style={{ alignSelf: 'flex-start', overflowX: 'auto', maxWidth: '100%' }}>
             {([['7', 'Неделя'], ['30', '30 дней'], ['365', 'Год']] as const).map(([v, l]) => (
               <button key={v} className={`seg-item ${period === v ? 'on' : ''}`} onClick={() => setPeriod(v)}>{l}</button>
             ))}
@@ -471,7 +428,7 @@ const StatisticsPage: React.FC = () => {
       </div>
       <div className="card" style={{ padding: 24 }}>
         <h3 className="h-sec mb-4">Статистика подписок</h3>
-        <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
           {[
             ['Всего', fmtN(stats.totalSubscriptions)],
             ['Платных', fmtN(stats.paidSubscriptions)],
@@ -1534,25 +1491,24 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
   ];
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex' }}>
+    <div className="panel-shell">
       <ToastContainer toasts={toasts} remove={removeToast} />
 
-      {/* Sidebar */}
-      <aside style={{
-        position: 'fixed', top: 0, left: 0, bottom: 0, width: 232, zIndex: 50,
-        background: 'var(--surface)', borderRight: '1px solid var(--border)',
-        display: 'flex', flexDirection: 'column', overflowY: 'auto',
-      }} className={isMobileOpen ? '' : 'hidden md:flex'}>
-        <div style={{ padding: '22px 16px 14px', borderBottom: '1px solid var(--border)' }}>
+      <aside className={`panel-sidebar ${isMobileOpen ? 'open' : ''}`}>
+        <div className="panel-sidebar-brand">
           <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: '-0.01em' }}>1FEDERAL</div>
           <div className="sub" style={{ fontSize: 11, marginTop: 2 }}>Admin Panel</div>
+          <button type="button" className="icon-btn panel-sidebar-close" onClick={() => setIsMobileOpen(false)} aria-label="Закрыть меню">
+            <X size={17} />
+          </button>
         </div>
-        <nav style={{ padding: '10px 8px', flex: 1 }}>
+        <nav className="panel-sidebar-nav">
           {nav.map(section => (
             <div key={section.group} style={{ marginBottom: 18 }}>
               <div className="nav-group" style={{ marginBottom: 4 }}>{section.group}</div>
               {section.items.map(item => (
                 <button key={item.name}
+                  type="button"
                   className={`nav-item ${activePage === item.name && !openUserId ? 'on' : ''}`}
                   onClick={() => { setActivePage(item.name); closeUser(); setIsMobileOpen(false); }}>
                   <item.icon size={15} className={activePage === item.name && !openUserId ? '' : 'faint'} />
@@ -1562,36 +1518,28 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
             </div>
           ))}
         </nav>
-        <div style={{ padding: '10px 8px', borderTop: '1px solid var(--border)' }}>
-          <button className="btn ghost block" onClick={onLogout} style={{ justifyContent: 'flex-start', gap: 10 }}>
+        <div className="panel-sidebar-foot">
+          <button type="button" className="btn ghost block" onClick={onLogout} style={{ justifyContent: 'flex-start', gap: 10 }}>
             <Lock size={14} className="faint" /> Выйти
           </button>
         </div>
       </aside>
 
-      {/* Mobile overlay */}
       {isMobileOpen && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 40 }} onClick={() => setIsMobileOpen(false)} />
+        <button type="button" className="panel-backdrop" aria-label="Закрыть меню" onClick={() => setIsMobileOpen(false)} />
       )}
 
-      {/* Main */}
-      <main style={{ flex: 1, marginLeft: 0 }} className="md:ml-[232px]">
-        {/* Topbar */}
-        <div style={{
-          position: 'sticky', top: 0, zIndex: 30,
-          background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid var(--border)',
-          padding: '9px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        }}>
-          <div className="flex items-center gap-3">
-            <button className="icon-btn md:hidden" onClick={() => setIsMobileOpen(!isMobileOpen)}>
+      <main className="panel-main">
+        <div className="panel-topbar">
+          <div className="flex items-center gap-3 min-w-0">
+            <button type="button" className="icon-btn panel-menu-btn" onClick={() => setIsMobileOpen(v => !v)} aria-label="Меню">
               {isMobileOpen ? <X size={17} /> : <Menu size={17} />}
             </button>
-            <span style={{ fontWeight: 600, fontSize: 14 }}>
+            <span className="panel-topbar-title">
               {openUserId ? `Пользователь #${openUserId}` : activePage}
             </span>
           </div>
-          <div className="inset" style={{ padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div className="inset panel-topbar-rev">
             <DollarSign size={13} className="faint" />
             <span style={{ fontWeight: 600, fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>
               {totalRevenue.toLocaleString('ru-RU')} ₽
@@ -1599,9 +1547,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
 
-        {/* Page */}
-        <div style={{ padding: 24 }}>
-          {/* User detail overrides page content */}
+        <div className="panel-page">
           {openUserId && activePage === 'Пользователи' ? (
             <UserDetailPage
               userId={openUserId}
@@ -1610,7 +1556,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
             />
           ) : (
             <>
-              {activePage === 'Главная' && <Dashboard />}
+              {activePage === 'Главная' && <Dashboard onNavigate={(page) => { setActivePage(page); closeUser(); }} />}
               {activePage === 'Финансы' && <><FinancePage transactions={transactions} onSelect={setSelectedTx} />{selectedTx && <TransactionModal tx={selectedTx} onClose={() => setSelectedTx(null)} />}</>}
               {activePage === 'Статистика' && <StatisticsPage />}
               {activePage === 'Пользователи' && <UsersPage onOpenUser={openUser} />}
