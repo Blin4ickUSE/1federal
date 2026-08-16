@@ -215,8 +215,19 @@ def extend_vpn_key(
                 payment_method, str(payment_id) if payment_id else None, int(days),
             ),
         )
+        tx_id = cursor.lastrowid
         conn.commit()
         database.link_recurring_subscription_to_vpn_key(user_id, int(key_id))
+        try:
+            paid = float(amount or 0)
+            if paid > 0:
+                database.accrue_developer_share(
+                    paid,
+                    source_transaction_id=int(tx_id) if tx_id else None,
+                    note=f'Доля с автопродления {paid:.2f}₽',
+                )
+        except Exception as exc:
+            logger.error('Developer share accrual on extend failed: %s', exc)
 
         if notify:
             user = database.get_user_by_id(user_id)

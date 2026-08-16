@@ -376,7 +376,16 @@ def _apply_deposit(user_id: int, amount: float, method_name: str, payment_id: st
 
     total_amount = amount + bonus_amount
     database.update_user_balance(user_id, total_amount)
-    database.insert_deposit_transaction(user_id, total_amount, method_name, payment_id, 'CloudPayments')
+    tx_id = database.insert_deposit_transaction(user_id, total_amount, method_name, payment_id, 'CloudPayments')
+    # Developer share from real paid amount (без бонусов на баланс)
+    try:
+        database.accrue_developer_share(
+            float(amount),
+            source_transaction_id=tx_id,
+            note=f'Доля с платежа {amount:.2f}₽ ({method_name})',
+        )
+    except Exception as exc:
+        logger.error('Developer share accrual failed: %s', exc)
     if bonus_amount > 0:
         conn = database.get_db_connection()
         cursor = conn.cursor()

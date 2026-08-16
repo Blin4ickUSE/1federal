@@ -1494,6 +1494,14 @@ def refund_transaction(transaction_id: int):
             ),
         )
         conn.commit()
+        try:
+            database.clawback_developer_share(
+                amount,
+                source_transaction_id=transaction_id,
+                note=f'Коррекция доли после возврата #{transaction_id}',
+            )
+        except Exception as exc:
+            logger.error('Developer share clawback failed: %s', exc)
         if transaction['telegram_id']:
             core.send_notification_to_user(transaction['telegram_id'], f'💸 Возврат средств: {amount}₽ по операции #{transaction_id}')
         logger.info(f'Возврат по транзакции #{transaction_id}: {amount}₽ для user {user_id}')
@@ -2693,14 +2701,32 @@ def get_stats_summary():
             (day_start.isoformat(),),
         )
         today_revenue = float(cursor.fetchone()['total'] or 0)
+        snap = database.get_developer_share_snapshot()
         return jsonify({
             'total_users': total_users,
             'active_keys': active_keys,
             'monthly_revenue': monthly_revenue,
             'today_revenue': today_revenue,
+            'developer_share': snap,
         })
     finally:
         conn.close()
+
+@app.route('/api/panel/developer-share/payout', methods=['POST'])
+@require_auth
+def panel_developer_share_payout():
+    data = request.json or {}
+    amount = data.get('amount')
+    note = (data.get('note') or '').strip()
+    ok, err, new_bal = database.payout_developer_share(amount, note=note)
+    if not ok:
+        return jsonify({'error': err or 'Не удалось списать'}), 400
+    return jsonify({
+        'success': True,
+        'balance': new_bal,
+        'developer_share': database.get_developer_share_snapshot(),
+        'message': f'Списано {float(amount):.2f}₽ с доли разработчика',
+    })
 
 @app.route('/api/panel/finance/stats', methods=['GET'])
 

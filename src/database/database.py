@@ -132,6 +132,18 @@ def init_database():
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS auto_discounts (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                name TEXT NOT NULL,\n                condition_type TEXT NOT NULL,\n                condition_value TEXT NOT NULL,\n                discount_type TEXT NOT NULL,\n                discount_value REAL NOT NULL,\n                is_active INTEGER DEFAULT 1,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS public_pages (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                page_type TEXT UNIQUE NOT NULL,\n                content TEXT NOT NULL,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS system_settings (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                setting_key TEXT UNIQUE NOT NULL,\n                setting_value TEXT NOT NULL,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS developer_share_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                balance_after REAL NOT NULL,
+                source_transaction_id INTEGER,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_dev_share_ledger_created ON developer_share_ledger(created_at)')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS payment_fees (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                payment_method TEXT UNIQUE NOT NULL,\n                fee_percent REAL DEFAULT 0.0,\n                fee_fixed REAL DEFAULT 0.0,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS saved_payment_methods (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                payment_provider TEXT NOT NULL,\n                payment_method_id TEXT NOT NULL,\n                payment_method_type TEXT,\n                card_last4 TEXT,\n                card_brand TEXT,\n                is_active INTEGER DEFAULT 1,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id),\n                UNIQUE(user_id, payment_provider, payment_method_id)\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS payment_provider_settings (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                provider TEXT NOT NULL,\n                setting_key TEXT NOT NULL,\n                setting_value TEXT,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                UNIQUE(provider, setting_key)\n            )\n        ')
@@ -727,6 +739,257 @@ def set_system_setting(key: str, value: str) -> bool:
         return True
     except:
         return False
+    finally:
+        conn.close()
+
+# ── Developer revenue share (default 10%) ─────────────────────────
+
+def get_dev_share_percent() -> float:
+    try:
+        return max(0.0, min(100.0, float(get_system_setting('dev_share_percent', '10') or 10)))
+    except (TypeError, ValueError):
+        return 10.0
+
+def _dev_share_float(key: str, default: float = 0.0) -> float:
+    try:
+        return float(get_system_setting(key, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+def _set_dev_share_float(key: str, value: float) -> None:
+    set_system_setting(key, f'{round(float(value), 2):.2f}')
+
+def ensure_dev_share_bootstrapped() -> None:
+    """One-time: seed balance from historical revenue * percent.
+
+    Revenue = successful deposits + abs(successful CloudPayments auto-extends).
+    Balance top-ups that later buy subscriptions are counted once (at deposit).
+    """
+    if get_system_setting('dev_share_bootstrapped', '0') == '1':
+        return
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS total
+            FROM transactions
+            WHERE type = 'deposit' AND status = 'Success'
+            """
+        )
+        deposits = float(cursor.fetchone()['total'] or 0)
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(ABS(amount)), 0) AS total
+            FROM transactions
+            WHERE type = 'subscription_extend' AND status = 'Success'
+              AND payment_provider = 'CloudPayments'
+            """
+        )
+        extends = float(cursor.fetchone()['total'] or 0)
+        revenue = deposits + extends
+        percent = get_dev_share_percent()
+        share = round(revenue * percent / 100.0, 2)
+        _set_dev_share_float('dev_share_balance', share)
+        _set_dev_share_float('dev_share_total_accrued', share)
+        _set_dev_share_float('dev_share_total_paid', 0.0)
+        set_system_setting('dev_share_bootstrapped', '1')
+        if share > 0:
+            cursor.execute(
+                """
+                INSERT INTO developer_share_ledger (entry_type, amount, balance_after, note)
+                VALUES ('bootstrap', ?, ?, ?)
+                """,
+                (
+                    share,
+                    share,
+                    f'Начальный расчёт {percent}% от дохода {revenue:.2f}₽ '
+                    f'(депозиты {deposits:.2f}₽ + автопродления {extends:.2f}₽)',
+                ),
+            )
+            conn.commit()
+        logger.info(
+            'Developer share bootstrapped: balance=%s from revenue=%s (deposits=%s extends=%s)',
+            share, revenue, deposits, extends,
+        )
+    except Exception as e:
+        logger.error('Developer share bootstrap failed: %s', e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+def get_developer_share_snapshot() -> Dict[str, Any]:
+    ensure_dev_share_bootstrapped()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT id, entry_type, amount, balance_after, source_transaction_id, note, created_at
+            FROM developer_share_ledger
+            ORDER BY id DESC
+            LIMIT 30
+            """
+        )
+        ledger = [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+    return {
+        'percent': get_dev_share_percent(),
+        'balance': round(_dev_share_float('dev_share_balance'), 2),
+        'total_accrued': round(_dev_share_float('dev_share_total_accrued'), 2),
+        'total_paid': round(_dev_share_float('dev_share_total_paid'), 2),
+        'ledger': ledger,
+    }
+
+def accrue_developer_share(revenue_amount: float, source_transaction_id: int = None, note: str = '') -> float:
+    """Accrue percent of real revenue onto developer balance. Returns accrued share."""
+    ensure_dev_share_bootstrapped()
+    revenue_amount = float(revenue_amount or 0)
+    if revenue_amount <= 0:
+        return 0.0
+    percent = get_dev_share_percent()
+    share = round(revenue_amount * percent / 100.0, 2)
+    if share <= 0:
+        return 0.0
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        bal = _dev_share_float('dev_share_balance')
+        accrued = _dev_share_float('dev_share_total_accrued')
+        # re-read inside tx via SQL for consistency
+        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'dev_share_balance'")
+        row = cursor.fetchone()
+        bal = float(row['setting_value']) if row else bal
+        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'dev_share_total_accrued'")
+        row = cursor.fetchone()
+        accrued = float(row['setting_value']) if row else accrued
+        new_bal = round(bal + share, 2)
+        new_accrued = round(accrued + share, 2)
+        cursor.execute(
+            'INSERT OR REPLACE INTO system_settings (setting_key, setting_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            ('dev_share_balance', f'{new_bal:.2f}'),
+        )
+        cursor.execute(
+            'INSERT OR REPLACE INTO system_settings (setting_key, setting_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            ('dev_share_total_accrued', f'{new_accrued:.2f}'),
+        )
+        cursor.execute(
+            """
+            INSERT INTO developer_share_ledger (entry_type, amount, balance_after, source_transaction_id, note)
+            VALUES ('accrual', ?, ?, ?, ?)
+            """,
+            (share, new_bal, source_transaction_id, note or f'{percent}% от дохода {revenue_amount:.2f}₽'),
+        )
+        conn.commit()
+        return share
+    except Exception as e:
+        logger.error('accrue_developer_share error: %s', e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0.0
+    finally:
+        conn.close()
+
+def clawback_developer_share(revenue_amount: float, source_transaction_id: int = None, note: str = '') -> float:
+    """Reduce developer balance after a refund (up to available balance)."""
+    ensure_dev_share_bootstrapped()
+    revenue_amount = float(revenue_amount or 0)
+    if revenue_amount <= 0:
+        return 0.0
+    percent = get_dev_share_percent()
+    share = round(revenue_amount * percent / 100.0, 2)
+    if share <= 0:
+        return 0.0
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'dev_share_balance'")
+        row = cursor.fetchone()
+        bal = float(row['setting_value']) if row else 0.0
+        claw = min(share, bal)
+        if claw <= 0:
+            conn.rollback()
+            return 0.0
+        new_bal = round(bal - claw, 2)
+        cursor.execute(
+            'INSERT OR REPLACE INTO system_settings (setting_key, setting_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            ('dev_share_balance', f'{new_bal:.2f}'),
+        )
+        cursor.execute(
+            """
+            INSERT INTO developer_share_ledger (entry_type, amount, balance_after, source_transaction_id, note)
+            VALUES ('clawback', ?, ?, ?, ?)
+            """,
+            (-claw, new_bal, source_transaction_id, note or f'Коррекция после возврата {revenue_amount:.2f}₽'),
+        )
+        conn.commit()
+        return claw
+    except Exception as e:
+        logger.error('clawback_developer_share error: %s', e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0.0
+    finally:
+        conn.close()
+
+def payout_developer_share(amount: float, note: str = '') -> Tuple[bool, str, float]:
+    """Mark a developer payout: decrease unpaid balance. Returns (ok, error, new_balance)."""
+    ensure_dev_share_bootstrapped()
+    try:
+        amount = round(float(amount), 2)
+    except (TypeError, ValueError):
+        return False, 'Некорректная сумма', 0.0
+    if amount <= 0:
+        return False, 'Сумма должна быть больше 0', 0.0
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'dev_share_balance'")
+        row = cursor.fetchone()
+        bal = float(row['setting_value']) if row else 0.0
+        if amount > bal + 0.001:
+            conn.rollback()
+            return False, f'Недостаточно: на балансе {bal:.2f}₽', bal
+        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'dev_share_total_paid'")
+        row = cursor.fetchone()
+        paid = float(row['setting_value']) if row else 0.0
+        new_bal = round(bal - amount, 2)
+        new_paid = round(paid + amount, 2)
+        cursor.execute(
+            'INSERT OR REPLACE INTO system_settings (setting_key, setting_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            ('dev_share_balance', f'{new_bal:.2f}'),
+        )
+        cursor.execute(
+            'INSERT OR REPLACE INTO system_settings (setting_key, setting_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            ('dev_share_total_paid', f'{new_paid:.2f}'),
+        )
+        cursor.execute(
+            """
+            INSERT INTO developer_share_ledger (entry_type, amount, balance_after, note)
+            VALUES ('payout', ?, ?, ?)
+            """,
+            (-amount, new_bal, note or f'Выплата разработчику {amount:.2f}₽'),
+        )
+        conn.commit()
+        return True, '', new_bal
+    except Exception as e:
+        logger.error('payout_developer_share error: %s', e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, str(e), 0.0
     finally:
         conn.close()
 
@@ -1631,7 +1894,7 @@ def insert_deposit_transaction(
     method_name: str,
     payment_id: str,
     provider: str = 'CloudPayments',
-) -> None:
+) -> Optional[int]:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -1642,7 +1905,9 @@ def insert_deposit_transaction(
             """,
             (user_id, float(amount), method_name, provider, str(payment_id)),
         )
+        tx_id = cursor.lastrowid
         conn.commit()
+        return int(tx_id) if tx_id else None
     finally:
         conn.close()
 

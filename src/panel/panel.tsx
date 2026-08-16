@@ -269,14 +269,46 @@ function LoginForm({ onLogin }: { onLogin: (s: string) => void }) {
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────
-const Dashboard: React.FC<{ onNavigate: (page: string) => void }> = ({ onNavigate }) => {
+const Dashboard: React.FC<{ onNavigate: (page: string) => void; onToast?: (t: string, m?: string, ty?: ToastType) => void }> = ({ onNavigate, onToast }) => {
   const [summary, setSummary] = useState<any>(null);
+  const [payoutAmount, setPayoutAmount] = useState('');
+  const [payoutBusy, setPayoutBusy] = useState(false);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     apiFetch('/panel/stats/summary').then(d => d && setSummary(d)).catch(console.error);
   }, []);
 
+  useEffect(() => { reload(); }, [reload]);
+
   const fmtM2 = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M ₽` : fmtM(v);
+  const share = summary?.developer_share;
+
+  const doPayout = async () => {
+    const amount = Math.round(Number(payoutAmount) * 100) / 100;
+    if (!amount || amount <= 0) {
+      onToast?.('Укажите сумму', undefined, 'error');
+      return;
+    }
+    if (!confirm(`Списать ${amount.toLocaleString('ru-RU')} ₽ с доли разработчика?`)) return;
+    setPayoutBusy(true);
+    try {
+      const d = await apiFetch('/panel/developer-share/payout', {
+        method: 'POST',
+        body: JSON.stringify({ amount, note: `Выплата ${amount}₽` }),
+      });
+      onToast?.(d?.message || 'Списано');
+      setPayoutAmount('');
+      if (d?.developer_share) {
+        setSummary((prev: any) => ({ ...prev, developer_share: d.developer_share }));
+      } else {
+        reload();
+      }
+    } catch (e: any) {
+      onToast?.('Ошибка', e?.message || String(e), 'error');
+    } finally {
+      setPayoutBusy(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-6 rise">
@@ -290,6 +322,68 @@ const Dashboard: React.FC<{ onNavigate: (page: string) => void }> = ({ onNavigat
         <Stat title="Активные ключи" value={summary ? fmtN(summary.active_keys) : '—'} icon={Key} />
         <Stat title="Доход за месяц" value={summary ? fmtM2(summary.monthly_revenue) : '—'} icon={DollarSign} />
         <Stat title="Доход за сегодня" value={summary ? fmtM2(summary.today_revenue ?? 0) : '—'} icon={CreditCard} />
+      </div>
+
+      <div className="card" style={{ padding: 20 }}>
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+          <div>
+            <h3 className="h-sec">Доля разработчика</h3>
+            <div className="sub mt-1">{share ? `${share.percent}% от дохода проекта` : '10% от дохода проекта'}</div>
+          </div>
+          <div className="badge solid">{share ? fmtM2(share.balance) : '—'}</div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+          <div className="inset" style={{ padding: 12 }}>
+            <div className="sub" style={{ fontSize: 11 }}>К выплате</div>
+            <div style={{ fontWeight: 600, fontSize: 18, marginTop: 4 }}>{share ? fmtM2(share.balance) : '—'}</div>
+          </div>
+          <div className="inset" style={{ padding: 12 }}>
+            <div className="sub" style={{ fontSize: 11 }}>Всего начислено</div>
+            <div style={{ fontWeight: 600, fontSize: 18, marginTop: 4 }}>{share ? fmtM2(share.total_accrued) : '—'}</div>
+          </div>
+          <div className="inset" style={{ padding: 12 }}>
+            <div className="sub" style={{ fontSize: 11 }}>Уже выплачено</div>
+            <div style={{ fontWeight: 600, fontSize: 18, marginTop: 4 }}>{share ? fmtM2(share.total_paid) : '—'}</div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 items-end">
+          <div style={{ flex: '1 1 140px' }}>
+            <label className="field-label">Списать с баланса (когда заплатили)</label>
+            <input
+              className="input mono"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="Сумма ₽"
+              value={payoutAmount}
+              onChange={e => setPayoutAmount(e.target.value)}
+            />
+          </div>
+          <button className="btn solid" disabled={payoutBusy || !payoutAmount} onClick={doPayout}>
+            {payoutBusy ? <Spinner size={14} /> : 'Списать'}
+          </button>
+          {share?.balance > 0 && (
+            <button className="btn" type="button" onClick={() => setPayoutAmount(String(share.balance))}>
+              Всё
+            </button>
+          )}
+        </div>
+        {(share?.ledger || []).length > 0 && (
+          <div className="mt-4" style={{ maxHeight: 180, overflowY: 'auto' }}>
+            <div className="sub mb-2" style={{ fontSize: 11 }}>Последние операции</div>
+            {(share.ledger as any[]).slice(0, 8).map((row: any) => (
+              <div key={row.id} className="flex justify-between gap-3" style={{ fontSize: 12, padding: '4px 0', borderBottom: '1px solid var(--border)' }}>
+                <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {row.entry_type === 'accrual' ? 'Начисление' : row.entry_type === 'payout' ? 'Выплата' : row.entry_type === 'clawback' ? 'Коррекция' : row.entry_type === 'bootstrap' ? 'Старт' : row.entry_type}
+                  {row.note ? ` · ${row.note}` : ''}
+                </span>
+                <span className="mono" style={{ flex: 'none', color: row.amount >= 0 ? 'var(--text)' : 'var(--muted)' }}>
+                  {row.amount > 0 ? '+' : ''}{Number(row.amount).toLocaleString('ru-RU')} ₽
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ padding: 20 }}>
@@ -1653,7 +1747,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
             />
           ) : (
             <>
-              {activePage === 'Главная' && <Dashboard onNavigate={(page) => { setActivePage(page); closeUser(); }} />}
+              {activePage === 'Главная' && <Dashboard onNavigate={(page) => { setActivePage(page); closeUser(); }} onToast={addToast} />}
               {activePage === 'Финансы' && (
                 <>
                   <FinancePage transactions={transactions} onSelect={setSelectedTx} />
