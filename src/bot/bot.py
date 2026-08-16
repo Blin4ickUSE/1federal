@@ -88,16 +88,20 @@ async def cmd_start(message: types.Message):
         )
         return
 
-    # Plain HTML — custom emoji often causes slow/failed sendMessage on bad networks
+    # Изменяем разметку на MarkdownV2 и подставляем синтаксис кастомного эмодзи
     text = (
-        '✈️ <b>Привет, мы — 1FEDERAL VPN!</b>\n\n'
-        'Безопасный VPN с современными протоколами для обхода блокировок.\n\n'
-        'Нажми кнопку ниже, чтобы начать 👇'
+        "![✈️](tg://emoji?id=5325674462522144646) *Привет, мы — 1FEDERAL VPN\!*\n\n"
+        "Безопасный VPN с современными протоколами для обхода блокировок\.\n\n"
+        "Нажми кнопку ниже, чтобы начать 👇"
     )
     keyboard = None
     if WEB_APP_URL:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]])
-    await _answer_retry(message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=WEB_APP_URL))]]
+        )
+    
+    # Меняем ParseMode.HTML на ParseMode.MARKDOWN_V2
+    await _answer_retry(message, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
 
 withdrawal_reject_states = {}
 
