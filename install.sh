@@ -266,6 +266,7 @@ create_env_file() {
     local panel_domain="$2"
     local email="$3"
     local ssl_port="$4"
+    local server_ip="${5:-}"
     
     log_info "\nЗаполнение переменных окружения:"
     
@@ -326,8 +327,17 @@ EOF
     log_warn "\n⚠️  CloudPayments настраивается в панели управления:"
     log_warn "   https://${panel_domain}${port_suffix}"
     log_info "\nПочта (OTP): письма уходят с no-reply@${domain}"
-    log_info "Добавьте SPF-запись для домена мини-приложения, например:"
-    log_info "  TXT @ \"v=spf1 a mx ip4:SERVER_IP ~all\""
+    if [[ -n "$server_ip" ]]; then
+        log_info "DNS для доставки писем (домен ${domain}):"
+        log_info "  1) SPF — TXT-запись на @ (или ${domain}):"
+        log_info "       v=spf1 ip4:${server_ip} ~all"
+        log_info "  2) PTR (обратная зона) — у хостера VPS для IP ${server_ip}:"
+        log_info "       укажите hostname ${domain}"
+        log_info "       и A-запись ${domain} → ${server_ip} уже должна совпадать (иначе многие почтовики режут)."
+    else
+        log_info "DNS для писем: SPF TXT @  →  v=spf1 ip4:ВАШ_IP_СЕРВЕРА ~all"
+        log_info "PTR у хостера для IP сервера → hostname ${domain} (и A ${domain} → тот же IP)."
+    fi
 }
 
 REPO_URL="https://github.com/Blin4ickUSE/1federal.git"
@@ -497,10 +507,10 @@ if [[ -f ".env" ]]; then
     if ! confirm "Перезаписать существующий .env? (y/n): "; then
         log_info "Используется существующий .env файл."
     else
-        create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" "$SSL_PORT"
+        create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" "$SSL_PORT" "$SERVER_IP"
     fi
 else
-    create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" "$SSL_PORT"
+    create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" "$SSL_PORT" "$SERVER_IP"
 fi
 
 log_info "\nШаг 6: подготовка директорий и запуск Docker-контейнеров"
@@ -529,5 +539,11 @@ ${BOLD}Веб‑панель:${NC}
 
 ${BOLD}Webhooks:${NC}
   CloudPayments:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/cloudpayments${NC}
+
+${BOLD}Почта (OTP):${NC}
+  From: no-reply@${DOMAIN}
+  SPF TXT @ : v=spf1 ip4:${SERVER_IP:-YOUR_SERVER_IP} ~all
+  PTR у хостера для IP ${SERVER_IP:-YOUR_SERVER_IP} -> hostname ${DOMAIN}
+  (A-запись ${DOMAIN} должна указывать на тот же IP)
 
 SUMMARY
