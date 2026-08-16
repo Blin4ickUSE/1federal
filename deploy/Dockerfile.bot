@@ -6,9 +6,9 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=120 \
     PYTHONUNBUFFERED=1
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir --retries 10 -r requirements.txt
+COPY requirements.txt requirements-bot.txt ./
+COPY deploy/pip_install.sh /tmp/pip_install.sh
+RUN chmod +x /tmp/pip_install.sh && /tmp/pip_install.sh requirements-bot.txt
 
 COPY src/ ./src/
 
