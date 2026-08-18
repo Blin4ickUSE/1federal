@@ -1936,7 +1936,7 @@ def panel_update_user(user_id: int):
     """
     Единый endpoint для изменения данных пользователя.
     field: partner_rate | partner_balance | referred_by | ban | unban | set_referrer | clear_referrer
-    Для Remnawave ключей: rw_extend | rw_reduce | rw_set_traffic | rw_set_devices | rw_block | rw_unblock
+    Для Remnawave ключей: rw_extend | rw_reduce | rw_set_traffic | rw_set_devices | rw_set_squads | rw_block | rw_unblock
     """
     data = request.get_json() or {}
     field = data.get('field')
@@ -2066,7 +2066,7 @@ def panel_update_user(user_id: int):
             return jsonify({'success': True})
 
         # ── Remnawave actions ──────────────────────────────────
-        elif field in ('rw_extend', 'rw_reduce', 'rw_set_traffic', 'rw_set_devices', 'rw_block', 'rw_unblock'):
+        elif field in ('rw_extend', 'rw_reduce', 'rw_set_traffic', 'rw_set_devices', 'rw_set_squads', 'rw_block', 'rw_unblock'):
             if not rw_uuid:
                 return jsonify({'error': 'rw_uuid required for Remnawave actions'}), 400
 
@@ -2141,6 +2141,15 @@ def panel_update_user(user_id: int):
                     (limit, rw_uuid)
                 )
                 notification_msg = f'📱 Лимит устройств: {limit}'
+
+            elif field == 'rw_set_squads':
+                squad_uuids = value if isinstance(value, list) else []
+                update_params['active_internal_squads'] = squad_uuids if squad_uuids else None
+                cursor.execute(
+                    "UPDATE vpn_keys SET squad_uuid = ? WHERE key_uuid = ?",
+                    (squad_uuids[0] if squad_uuids else None, rw_uuid)
+                )
+                notification_msg = '🌐 Сквады ключа обновлены'
 
             elif field == 'rw_block':
                 update_params['status'] = remnawave.UserStatus.DISABLED

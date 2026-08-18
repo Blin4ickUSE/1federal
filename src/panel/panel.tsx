@@ -628,6 +628,9 @@ const UserDetailPage: React.FC<{
   const [trafficGb, setTrafficGb] = useState('');
   const [devicesModal, setDevicesModal] = useState<{ rw_uuid: string; current: number | null } | null>(null);
   const [devicesVal, setDevicesVal] = useState('');
+  const [squadsModal, setSquadsModal] = useState<{ rw_uuid: string; current: string[] } | null>(null);
+  const [selectedSquads, setSelectedSquads] = useState<string[]>([]);
+  const [rwSquads, setRwSquads] = useState<{ uuid: string; name: string }[]>([]);
   const [notifMsg, setNotifMsg] = useState('');
   const [notifModal, setNotifModal] = useState(false);
 
@@ -647,6 +650,22 @@ const UserDetailPage: React.FC<{
   }, [userId]);
 
   useEffect(() => { reload(); }, [reload]);
+
+  useEffect(() => {
+    apiFetch('/panel/remnawave/squads')
+      .then(d => setRwSquads(Array.isArray(d) ? d : []))
+      .catch(() => setRwSquads([]));
+  }, []);
+
+  const squadName = (uuid: string) => rwSquads.find(s => s.uuid === uuid)?.name || uuid.slice(0, 8) + '…';
+
+  const parseKeySquads = (raw: any): string[] => {
+    if (!raw) return [];
+    if (Array.isArray(raw)) {
+      return raw.map(s => (typeof s === 'string' ? s : s?.uuid)).filter(Boolean);
+    }
+    return [];
+  };
 
   const update = async (field: string, value: any, extra?: Record<string, any>) => {
     if (!user) return;
@@ -935,6 +954,16 @@ const UserDetailPage: React.FC<{
                     <div className="eyebrow mb-1">Lifetime трафик</div>
                     <div style={{ fontWeight: 500, fontSize: 13 }}>{fmtGB(rk.lifetime_traffic_bytes)}</div>
                   </div>
+                  <div className="inset" style={{ padding: 12 }}>
+                    <div className="eyebrow mb-1">Сквады Remnawave</div>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {parseKeySquads(rk.active_internal_squads).length === 0
+                        ? <span className="muted" style={{ fontSize: 12 }}>Не назначены</span>
+                        : parseKeySquads(rk.active_internal_squads).map(uuid => (
+                          <span key={uuid} className="badge line" style={{ fontSize: 11 }}>{squadName(uuid)}</span>
+                        ))}
+                    </div>
+                  </div>
                 </div>
 
                 {/* Subscription URL */}
@@ -949,6 +978,7 @@ const UserDetailPage: React.FC<{
                   <button className="btn sm" onClick={() => { setReduceModal({ rw_uuid: rk.uuid }); setReduceDays(''); }}><Clock size={13} /> Уменьшить срок</button>
                   <button className="btn sm" onClick={() => { setTrafficModal({ rw_uuid: rk.uuid, current_gb: limitGb }); setTrafficGb(String(limitGb.toFixed(0))); }}><Database size={13} /> Трафик</button>
                   <button className="btn sm" onClick={() => { setDevicesModal({ rw_uuid: rk.uuid, current: rk.hwid_device_limit }); setDevicesVal(String(rk.hwid_device_limit ?? '')); }}><Smartphone size={13} /> Устройства</button>
+                  <button className="btn sm" onClick={() => { const cur = parseKeySquads(rk.active_internal_squads); setSquadsModal({ rw_uuid: rk.uuid, current: cur }); setSelectedSquads(cur); }}><Layers size={13} /> Сквады</button>
                   {rk.status === 'ACTIVE'
                     ? <button className="btn sm danger" onClick={() => update('rw_block', null, { rw_uuid: rk.uuid })}><Ban size={13} /> Заблокировать ключ</button>
                     : <button className="btn sm solid" onClick={() => update('rw_unblock', null, { rw_uuid: rk.uuid })}><CheckCircle size={13} /> Разблокировать ключ</button>
@@ -1167,6 +1197,43 @@ const UserDetailPage: React.FC<{
             <button className="step" onClick={() => setDevicesVal(String(parseInt(devicesVal || '1') + 1))}>+</button>
           </div>
           <div className="flex flex-wrap gap-2 mt-3">{[1, 2, 3, 5, 10, 20].map(n => (<button key={n} className={`chip ${devicesVal === String(n) ? 'on' : ''}`} onClick={() => setDevicesVal(String(n))}>{n}</button>))}</div>
+        </Modal>
+      )}
+
+      {squadsModal && (
+        <Modal onClose={() => setSquadsModal(null)} title="Сквады Remnawave" icon={Layers} width={460}
+          footer={<>
+            <button className="btn block" onClick={() => setSquadsModal(null)}>Отмена</button>
+            <button className="btn block solid" disabled={saving === 'rw_set_squads' || selectedSquads.length === 0} onClick={async () => {
+              await update('rw_set_squads', selectedSquads, { rw_uuid: squadsModal.rw_uuid, notify: true });
+              setSquadsModal(null);
+            }}>
+              {saving === 'rw_set_squads' ? <Spinner size={14} /> : 'Применить'}
+            </button>
+          </>}>
+          {rwSquads.length === 0 ? (
+            <p className="muted" style={{ fontSize: 13 }}>Список сквадов пуст. Синхронизируйте их в разделе «Сквады».</p>
+          ) : (
+            <>
+              <label className="field-label">Выберите сквады для ключа</label>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {rwSquads.map(sq => {
+                  const on = selectedSquads.includes(sq.uuid);
+                  return (
+                    <button
+                      key={sq.uuid}
+                      type="button"
+                      className={`chip ${on ? 'on' : ''}`}
+                      onClick={() => setSelectedSquads(prev => on ? prev.filter(u => u !== sq.uuid) : [...prev, sq.uuid])}
+                    >
+                      {sq.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="sub mt-3" style={{ fontSize: 11 }}>Можно выбрать несколько сквадов</div>
+            </>
+          )}
         </Modal>
       )}
 
@@ -1532,6 +1599,173 @@ const PromocodesPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType
   );
 };
 
+// ─── SQUADS PAGE ──────────────────────────────────────────────────
+interface SquadConfig {
+  squad_uuid: string;
+  squad_name: string;
+  squad_type: string;
+  max_users: number;
+  current_users: number;
+  is_active: number;
+  priority: number;
+}
+
+const SquadsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) => void }> = ({ onToast }) => {
+  const [squads, setSquads] = useState<SquadConfig[]>([]);
+  const [rwSquads, setRwSquads] = useState<{ uuid: string; name: string; members_count?: number }[]>([]);
+  const [defaultSquads, setDefaultSquads] = useState<string[]>([]);
+  const [mapping, setMapping] = useState<{ vpn: string[]; trial: string[] }>({ vpn: [], trial: [] });
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [savingDefaults, setSavingDefaults] = useState(false);
+  const [savingMapping, setSavingMapping] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [sqData, defData, rwData] = await Promise.all([
+        apiFetch('/panel/squads'),
+        apiFetch('/panel/default-squads'),
+        apiFetch('/panel/remnawave/squads').catch(() => []),
+      ]);
+      setSquads(sqData?.squads || []);
+      setMapping({ vpn: sqData?.mapping?.vpn || [], trial: sqData?.mapping?.trial || [] });
+      setDefaultSquads(defData?.vpn_squads || []);
+      setRwSquads(Array.isArray(rwData) ? rwData : []);
+    } catch (e: any) {
+      onToast('Ошибка загрузки', e.message, 'error');
+    }
+    setLoading(false);
+  }, [onToast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const squadOptions = rwSquads.length > 0
+    ? rwSquads
+    : squads.map(s => ({ uuid: s.squad_uuid, name: s.squad_name, members_count: s.current_users }));
+
+  const syncFromRemnawave = async () => {
+    setSyncing(true);
+    try {
+      const d = await apiFetch('/panel/squads/sync', { method: 'POST' });
+      onToast('Синхронизация завершена', `${d?.count ?? 0} сквадов`, 'success');
+      await load();
+    } catch (e: any) {
+      onToast('Ошибка синхронизации', e.message, 'error');
+    }
+    setSyncing(false);
+  };
+
+  const saveDefaults = async () => {
+    setSavingDefaults(true);
+    try {
+      await apiFetch('/panel/default-squads', { method: 'PUT', body: JSON.stringify({ vpn_squads: defaultSquads }) });
+      onToast('Сквады по умолчанию сохранены', undefined, 'success');
+    } catch (e: any) {
+      onToast('Ошибка', e.message, 'error');
+    }
+    setSavingDefaults(false);
+  };
+
+  const saveMapping = async () => {
+    setSavingMapping(true);
+    try {
+      await apiFetch('/panel/squads/mapping', { method: 'PUT', body: JSON.stringify(mapping) });
+      onToast('Маппинг подписок сохранён', undefined, 'success');
+    } catch (e: any) {
+      onToast('Ошибка', e.message, 'error');
+    }
+    setSavingMapping(false);
+  };
+
+  const toggleChip = (list: string[], uuid: string, setter: (v: string[]) => void) => {
+    setter(list.includes(uuid) ? list.filter(u => u !== uuid) : [...list, uuid]);
+  };
+
+  const ChipPicker: React.FC<{ label: string; selected: string[]; onChange: (v: string[]) => void }> = ({ label, selected, onChange }) => (
+    <div>
+      <label className="field-label">{label}</label>
+      {squadOptions.length === 0 ? (
+        <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>Нет сквадов — нажмите «Синхронизировать»</p>
+      ) : (
+        <div className="flex flex-wrap gap-2 mt-2">
+          {squadOptions.map(sq => (
+            <button
+              key={sq.uuid}
+              type="button"
+              className={`chip ${selected.includes(sq.uuid) ? 'on' : ''}`}
+              onClick={() => toggleChip(selected, sq.uuid, onChange)}
+            >
+              {sq.name}
+              {sq.members_count != null && <span className="faint" style={{ fontSize: 11 }}>({sq.members_count})</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  if (loading) return (
+    <div className="flex items-center justify-center" style={{ height: 200 }}><Spinner size={28} /></div>
+  );
+
+  return (
+    <div className="flex flex-col gap-6 rise">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="h-page">Сквады Remnawave</div>
+          <div className="sub mt-1">Выбор сквадов для новых подписок и балансировка</div>
+        </div>
+        <button className="btn solid" disabled={syncing} onClick={syncFromRemnawave}>
+          {syncing ? <Spinner size={14} /> : <><RefreshCw size={14} /> Синхронизировать</>}
+        </button>
+      </div>
+
+      <div className="card" style={{ padding: 24 }}>
+        <h3 className="h-sec mb-4">Сквады по умолчанию (VPN)</h3>
+        <ChipPicker label="Используются, если балансировщик не выбрал сквад" selected={defaultSquads} onChange={setDefaultSquads} />
+        <button className="btn solid mt-4" disabled={savingDefaults || defaultSquads.length === 0} onClick={saveDefaults}>
+          {savingDefaults ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}
+        </button>
+      </div>
+
+      <div className="card" style={{ padding: 24 }}>
+        <h3 className="h-sec mb-4">Маппинг подписок → сквады</h3>
+        <div className="flex flex-col gap-5">
+          <ChipPicker label="VPN / платные подписки" selected={mapping.vpn} onChange={v => setMapping(m => ({ ...m, vpn: v }))} />
+          <ChipPicker label="Trial / пробные" selected={mapping.trial} onChange={v => setMapping(m => ({ ...m, trial: v }))} />
+        </div>
+        <button className="btn solid mt-4" disabled={savingMapping} onClick={saveMapping}>
+          {savingMapping ? <Spinner size={14} /> : <><Save size={14} /> Сохранить маппинг</>}
+        </button>
+      </div>
+
+      <div className="tbl-wrap">
+        <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
+          <h3 className="h-sec">Настроенные сквады ({squads.length})</h3>
+        </div>
+        <table className="tbl">
+          <thead><tr><th>Название</th><th>Тип</th><th>Пользователей</th><th>Лимит</th><th>Приоритет</th><th>Статус</th></tr></thead>
+          <tbody>
+            {squads.length === 0
+              ? <tr className="empty-row"><td colSpan={6}>Нет сквадов — синхронизируйте из Remnawave</td></tr>
+              : squads.map(s => (
+                <tr key={s.squad_uuid}>
+                  <td style={{ fontWeight: 500 }}>{s.squad_name}</td>
+                  <td><span className="badge line">{s.squad_type}</span></td>
+                  <td className="mono muted">{s.current_users}</td>
+                  <td className="muted">{s.max_users > 0 ? s.max_users : '∞'}</td>
+                  <td className="muted">{s.priority}</td>
+                  <td><span className={`badge ${s.is_active ? 'solid' : 'line'}`}>{s.is_active ? 'Активен' : 'Выкл'}</span></td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 // ─── SETTINGS PAGE ────────────────────────────────────────────────
 const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) => void; onLogout: () => void }> = ({ onToast, onLogout }) => {
   const [settings, setSettings] = useState<any>(null);
@@ -1678,7 +1912,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Финансы', icon: DollarSign }, { name: 'Статистика', icon: BarChart2 }] },
     { group: 'Данные', items: [{ name: 'Пользователи', icon: Users }, { name: 'Ключи', icon: Key }] },
     { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Gift }] },
-    { group: 'Система', items: [{ name: 'Настройки', icon: Settings }] },
+    { group: 'Система', items: [{ name: 'Сквады', icon: Layers }, { name: 'Настройки', icon: Settings }] },
   ];
 
   return (
@@ -1766,6 +2000,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
               {activePage === 'Ключи' && <KeysPage onToast={addToast} />}
               {activePage === 'Рассылка' && <MailingPage onToast={addToast} />}
               {activePage === 'Промокоды' && <PromocodesPage onToast={addToast} />}
+              {activePage === 'Сквады' && <SquadsPage onToast={addToast} />}
               {activePage === 'Настройки' && <SettingsPage onToast={addToast} onLogout={onLogout} />}
             </>
           )}
