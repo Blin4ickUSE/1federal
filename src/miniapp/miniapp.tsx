@@ -478,7 +478,7 @@ const PRIVACY_POLICY_TEXT = `
 `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
-  { id: 'trial_7d', duration: 'Пробная подписка', price: 1, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'trial_7d', duration: 'Пробная подписка', price: 10, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
   { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 499, benefitPercent: 0 },
   { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
   { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.9 },
