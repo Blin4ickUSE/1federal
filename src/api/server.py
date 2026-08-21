@@ -642,7 +642,7 @@ def create_payment(_user=None):
 
     if is_trial:
         days = 7
-        amount = 1.0
+        amount = 10.0
         plan_type = 'vpn_regular'
         tariff_category = 'regular'
         devices_limit = 2
@@ -655,7 +655,7 @@ def create_payment(_user=None):
     # Все платные тарифы — счёт CloudPayments (оплата на orders.cloudpayments.ru)
     invoice_id = f'inv_{uuid_lib.uuid4().hex[:20]}'
     description = (
-        '1FEDERAL VPN — пробный период 7 дней за 1₽'
+        '1FEDERAL VPN — пробный период 7 дней за 10₽'
         if is_trial
         else f'1FEDERAL VPN — подписка на {days} дн.'
     )
@@ -1080,10 +1080,10 @@ def create_subscription(_user=None):
             if user.get('trial_used', 0) == 1:
                 return (jsonify({'error': 'Пробный период уже использован'}), 400)
             days = int(data.get('days', 7) or 7)
-            # Платный пробный период 7 дней за 1₽ (карта уже привязана)
-            price = float(data.get('price', 1) or 1)
+            # Платный пробный период 7 дней за 10₽ (карта уже привязана)
+            price = float(data.get('price', 10) or 10)
             if price <= 0:
-                price = 1.0
+                price = 10.0
             devices_limit = int(data.get('devices_limit', 2) or 2)
             plan_type = 'vpn_regular'
             tariff_category = 'regular'
@@ -1109,7 +1109,7 @@ def create_subscription(_user=None):
         cursor = conn.cursor()
         if is_trial:
             cursor.execute('UPDATE users SET trial_used = 1 WHERE id = ?', (user_id,))
-            description = f'Пробная подписка 7 дней за 1₽'
+            description = f'Пробная подписка 7 дней за 10₽'
             trans_type = 'trial'
         else:
             if finalize_promo_id:
