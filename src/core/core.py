@@ -28,6 +28,8 @@ def _get_admin_ids() -> List[int]:
 def send_notification_to_user(telegram_id: int, message: str, reply_markup: dict=None) -> bool:
     if not TELEGRAM_BOT_TOKEN:
         return False
+    if not telegram_id:
+        return False
     try:
         url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
         data = {'chat_id': telegram_id, 'text': message, 'parse_mode': 'HTML'}
