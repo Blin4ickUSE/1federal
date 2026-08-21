@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # После первой неудачи: 30м → 1ч → 2ч → 12ч → 24ч
 RETRY_DELAYS_MINUTES = (30, 60, 120, 720, 1440)
 
-MONTHLY_REGULAR_PRICE = 499.0
+MONTHLY_REGULAR_PRICE = 399.0
 MONTHLY_REGULAR_DAYS = 30
 MONTHLY_REGULAR_DEVICES = 2
 
@@ -265,7 +265,7 @@ def create_recurring_after_first_payment(
     sub_id = f'rcp_{uuid.uuid4().hex[:24]}'
 
     if is_trial:
-        # Через 7 дней списываем 499₽ и переводим на месячный обычный тариф (2 устройства)
+        # Через 7 дней списываем 399₽ и переводим на месячный обычный тариф (2 устройства)
         charge_amount = MONTHLY_REGULAR_PRICE
         renew_days = MONTHLY_REGULAR_DAYS
         renew_devices = MONTHLY_REGULAR_DEVICES
