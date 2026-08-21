@@ -479,6 +479,15 @@ def handle_pay(data: dict) -> None:
     if intent and intent.get('status') != 'paid':
         database.mark_payment_intent_paid(invoice_id, transaction_id)
         is_trial = bool(int(intent.get('is_trial') or 0))
+        if is_trial:
+            # Помечаем пробный период использованным сразу при оплате через CP
+            try:
+                conn_t = database.get_db_connection()
+                conn_t.execute('UPDATE users SET trial_used = 1 WHERE id = ?', (user_id,))
+                conn_t.commit()
+                conn_t.close()
+            except Exception as _e:
+                logger.error('handle_pay: failed to set trial_used for user %s: %s', user_id, _e)
         if token or saved_method_id:
             recurring.create_recurring_after_first_payment(
                 user_id=user_id,
