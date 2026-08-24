@@ -13,8 +13,16 @@ from src.database import database
 
 logger = logging.getLogger(__name__)
 
-# После первой неудачи: 30м → 1ч → 2ч → 12ч → 24ч
-RETRY_DELAYS_MINUTES = (30, 60, 120, 720, 1440)
+# Схема попыток (в минутах, отрицательное = до конца подписки):
+# -24ч, -12ч, -1ч, 0ч (момент окончания), +1ч, +4ч, +8ч, +12ч, +24ч
+# next_retry_at считает задержку относительно текущего момента (от предыдущей неудачи)
+RETRY_DELAYS_MINUTES = (60, 180, 240, 240, 720)  # +1ч, +4ч (3ч от +1ч), +8ч (4ч от +4ч), +12ч (4ч от +8ч), +24ч (12ч от +12ч)
+
+# Расписание попыток относительно момента окончания подписки (в часах)
+# Первые 4 попытки — ДО/в момент окончания (запускаются планировщиком заранее)
+# Попытки 5-9 — ПОСЛЕ окончания (через 1ч, 4ч, 8ч, 12ч, 24ч)
+PRE_EXPIRY_SCHEDULE_HOURS = [-24, -12, -1, 0]   # относительно expiry_date
+POST_EXPIRY_DELAYS_MINUTES = [60, 240, 480, 720, 1440]  # 1ч, 4ч, 8ч, 12ч, 24ч после предыдущей неудачи
 
 MONTHLY_REGULAR_PRICE = 399.0
 MONTHLY_REGULAR_DAYS = 30
@@ -30,11 +38,21 @@ def _iso(dt: datetime) -> str:
 
 
 def next_retry_at(retry_count: int, from_dt: Optional[datetime] = None) -> Optional[datetime]:
-    """retry_count — сколько неудач уже было (0 = ещё не ретраили)."""
-    if retry_count < 0 or retry_count >= len(RETRY_DELAYS_MINUTES):
+    """retry_count — сколько неудач уже было после момента окончания подписки (0 = первая постэкспайри попытка).
+    Планируется следующая постэкспайри попытка: +1ч, +4ч, +8ч, +12ч, +24ч.
+    """
+    if retry_count < 0 or retry_count >= len(POST_EXPIRY_DELAYS_MINUTES):
         return None
     base = from_dt or _now()
-    return base + timedelta(minutes=RETRY_DELAYS_MINUTES[retry_count])
+    return base + timedelta(minutes=POST_EXPIRY_DELAYS_MINUTES[retry_count])
+
+
+def schedule_pre_expiry_attempts(expiry_dt: datetime) -> list[str]:
+    """Вернуть список ISO-строк для попыток за 24ч, 12ч, 1ч до и в момент окончания подписки."""
+    return [
+        _iso(expiry_dt + timedelta(hours=h))
+        for h in PRE_EXPIRY_SCHEDULE_HOURS
+    ]
 
 
 def schedule_next_period(duration_days: int, from_dt: Optional[datetime] = None) -> str:
@@ -131,6 +149,7 @@ def extend_vpn_key(
     amount: float,
     *,
     devices_limit: Optional[int] = None,
+    traffic_limit: Optional[int] = None,
     notify: bool = True,
     payment_method: str = 'CloudPayments',
     payment_id: Optional[str] = None,
@@ -182,21 +201,34 @@ def extend_vpn_key(
 
         if key_uuid:
             try:
-                remnawave.remnawave_api.update_user_sync(
+                rw_kwargs = dict(
                     uuid=key_uuid,
                     expire_at=new_expiry,
                     status=remnawave.UserStatus.ACTIVE,
                     hwid_device_limit=new_devices,
                 )
+                if traffic_limit is not None:
+                    rw_kwargs['traffic_limit_bytes'] = int(traffic_limit)
+                remnawave.remnawave_api.update_user_sync(**rw_kwargs)
             except Exception as e:
                 logger.error('extend_vpn_key Remnawave update failed: %s', e)
                 return False
 
         new_expiry_str = new_expiry.isoformat()
-        if new_devices is not None:
+        if new_devices is not None and traffic_limit is not None:
+            cursor.execute(
+                "UPDATE vpn_keys SET status = 'Active', expiry_date = ?, devices_limit = ?, traffic_limit = ? WHERE id = ?",
+                (new_expiry_str, new_devices, int(traffic_limit), key_id),
+            )
+        elif new_devices is not None:
             cursor.execute(
                 "UPDATE vpn_keys SET status = 'Active', expiry_date = ?, devices_limit = ? WHERE id = ?",
                 (new_expiry_str, new_devices, key_id),
+            )
+        elif traffic_limit is not None:
+            cursor.execute(
+                "UPDATE vpn_keys SET status = 'Active', expiry_date = ?, traffic_limit = ? WHERE id = ?",
+                (new_expiry_str, int(traffic_limit), key_id),
             )
         else:
             cursor.execute(
@@ -272,7 +304,9 @@ def create_recurring_after_first_payment(
         renew_plan = 'vpn_regular'
         renew_category = 'regular'
         converts = 1
-        next_at = schedule_next_period(7)
+        # Первая попытка списания — за 24ч до конца триального периода
+        expiry_dt = _now() + timedelta(days=7)
+        next_at = _iso(expiry_dt + timedelta(hours=PRE_EXPIRY_SCHEDULE_HOURS[0]))
     else:
         charge_amount = float(amount)
         renew_days = int(duration_days)
@@ -280,7 +314,9 @@ def create_recurring_after_first_payment(
         renew_plan = plan_type
         renew_category = tariff_category
         converts = 0
-        next_at = schedule_next_period(renew_days)
+        # Первая попытка — за 24ч до конца текущего периода
+        expiry_dt = _now() + timedelta(days=renew_days)
+        next_at = _iso(expiry_dt + timedelta(hours=PRE_EXPIRY_SCHEDULE_HOURS[0]))
 
     ok = database.create_recurring_subscription(
         user_id=user_id,
@@ -302,7 +338,13 @@ def create_recurring_after_first_payment(
     return sub_id if ok else None
 
 
-def handle_failed_charge(sub: Dict[str, Any], reason: str = '') -> None:
+def handle_failed_charge(sub: Dict[str, Any], reason: str = '', is_pre_expiry: bool = False) -> None:
+    """Обрабатывает неудачное списание.
+
+    Если это до-/в-момент-истечения попытка (is_pre_expiry=True), retry_count не увеличивается —
+    планировщик сам выставит следующую pre-expiry попытку по расписанию.
+    После истечения подписки: retry_count идёт по POST_EXPIRY_DELAYS_MINUTES.
+    """
     user_id = int(sub['user_id'])
     sub_id = sub['subscription_id']
     retry_count = int(sub.get('retry_count') or 0)
@@ -319,6 +361,17 @@ def handle_failed_charge(sub: Dict[str, Any], reason: str = '') -> None:
         )
         fail_notified = 1
 
+    if is_pre_expiry:
+        # Планировщик сам выставляет следующую pre-expiry точку — просто обновляем notified
+        database.update_recurring_subscription(
+            sub_id,
+            status='PAST_DUE',
+            fail_notified=fail_notified,
+        )
+        logger.info('Recurring %s pre-expiry fail (%s), scheduler handles next attempt', sub_id, reason)
+        return
+
+    # Пост-истечение: перебираем POST_EXPIRY_DELAYS_MINUTES
     next_at = next_retry_at(retry_count)
     if next_at is None:
         database.update_recurring_subscription(
@@ -328,7 +381,7 @@ def handle_failed_charge(sub: Dict[str, Any], reason: str = '') -> None:
             fail_notified=fail_notified,
             next_charge_at=None,
         )
-        logger.info('Recurring %s exhausted retries, PAST_DUE (%s)', sub_id, reason)
+        logger.info('Recurring %s exhausted all retries, PAST_DUE (%s)', sub_id, reason)
         return
 
     database.update_recurring_subscription(
@@ -339,7 +392,7 @@ def handle_failed_charge(sub: Dict[str, Any], reason: str = '') -> None:
         next_charge_at=_iso(next_at),
     )
     logger.info(
-        'Recurring %s fail #%s, next retry at %s (%s)',
+        'Recurring %s post-expiry fail #%s, next retry at %s (%s)',
         sub_id, retry_count + 1, _iso(next_at), reason,
     )
 
@@ -363,18 +416,25 @@ def handle_successful_charge(
         devices = MONTHLY_REGULAR_DEVICES
         charge_amount = MONTHLY_REGULAR_PRICE
 
+    # При конвертации триала → платная: трафик 10 ТБ, 2 устройства
+    PAID_TRAFFIC_BYTES = int(10 * 1024 ** 4)  # 10 TB
     ok = extend_vpn_key(
         user_id,
         vpn_key_id,
         days,
         charge_amount,
         devices_limit=devices if converts else None,
+        traffic_limit=PAID_TRAFFIC_BYTES if converts else None,
         notify=True,
         payment_id=transaction_id,
     )
     if not ok:
         logger.error('Successful charge but VPN extend failed sub=%s', sub_id)
         return False
+
+    # Следующая попытка — за 24ч до конца нового периода
+    new_expiry_dt = _now() + timedelta(days=days)
+    next_charge = _iso(new_expiry_dt + timedelta(hours=PRE_EXPIRY_SCHEDULE_HOURS[0]))
 
     database.update_recurring_subscription(
         sub_id,
@@ -383,7 +443,7 @@ def handle_successful_charge(
         fail_notified=0,
         converts_from_trial=0,
         last_charge_at=_iso(_now()),
-        next_charge_at=schedule_next_period(days),
+        next_charge_at=next_charge,
         amount=charge_amount if converts else None,
         duration_days=days if converts else None,
         plan_type='vpn_regular' if converts else None,
@@ -466,4 +526,69 @@ def _charge_one(sub: Dict[str, Any]) -> None:
         )
         return
 
-    handle_failed_charge(sub, reason=str(result.get('reason') or result.get('error') or status))
+    # Определяем: это pre-expiry или post-expiry попытка?
+    # Смотрим на vpn_key expiry, чтобы понять, не истекла ли ещё подписка
+    is_pre = _is_pre_expiry_attempt(sub)
+
+    if is_pre:
+        # Попытка до истечения — планируем следующую pre-expiry точку
+        next_pre = _next_pre_expiry_attempt(sub)
+        if next_pre is not None:
+            database.update_recurring_subscription(
+                sub_id,
+                status='PAST_DUE',
+                fail_notified=int(sub.get('fail_notified') or 0),
+                next_charge_at=_iso(next_pre),
+            )
+            logger.info('Recurring %s pre-expiry fail, next pre-expiry attempt at %s', sub_id, _iso(next_pre))
+        else:
+            # Все pre-expiry точки пройдены — переходим к post-expiry
+            handle_failed_charge(sub, reason=str(result.get('reason') or result.get('error') or status), is_pre_expiry=False)
+    else:
+        handle_failed_charge(sub, reason=str(result.get('reason') or result.get('error') or status), is_pre_expiry=False)
+
+
+def _is_pre_expiry_attempt(sub: Dict[str, Any]) -> bool:
+    """Возвращает True если попытка произошла ДО истечения подписки."""
+    vpn_key_id = int(sub.get('vpn_key_id') or 0)
+    if not vpn_key_id:
+        return False
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT expiry_date FROM vpn_keys WHERE id = ?', (vpn_key_id,))
+        row = cursor.fetchone()
+        if not row or not row['expiry_date']:
+            return False
+        expiry_dt = datetime.fromisoformat(str(row['expiry_date']).replace('Z', '+00:00').replace('+00:00', ''))
+        return expiry_dt > _now()
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def _next_pre_expiry_attempt(sub: Dict[str, Any]) -> Optional[datetime]:
+    """Вернуть следующую pre-expiry точку для попытки, или None если все пройдены."""
+    vpn_key_id = int(sub.get('vpn_key_id') or 0)
+    if not vpn_key_id:
+        return None
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT expiry_date FROM vpn_keys WHERE id = ?', (vpn_key_id,))
+        row = cursor.fetchone()
+        if not row or not row['expiry_date']:
+            return None
+        expiry_dt = datetime.fromisoformat(str(row['expiry_date']).replace('Z', '+00:00').replace('+00:00', ''))
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+    now = _now()
+    for h in PRE_EXPIRY_SCHEDULE_HOURS:
+        candidate = expiry_dt + timedelta(hours=h)
+        if candidate > now + timedelta(minutes=5):  # с небольшим буфером
+            return candidate
+    return None

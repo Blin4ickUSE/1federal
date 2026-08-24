@@ -24,6 +24,33 @@ function getPanelSecret(): string {
 function setPanelSecret(s: string) { localStorage.setItem('panel_secret', s); }
 function clearPanelSecret() { localStorage.removeItem('panel_secret'); }
 
+const HTTP_STATUS_RU: Record<number, string> = {
+  400: 'Некорректный запрос',
+  401: 'Не авторизован',
+  403: 'Доступ запрещён',
+  404: 'Не найдено',
+  409: 'Конфликт данных',
+  422: 'Ошибка валидации',
+  429: 'Слишком много запросов',
+  500: 'Внутренняя ошибка сервера',
+  502: 'Ошибка шлюза',
+  503: 'Сервис недоступен',
+  504: 'Таймаут шлюза',
+};
+
+function parseApiError(status: number, text: string): string {
+  if (text) {
+    try {
+      const j = JSON.parse(text);
+      const msg = j.error || j.message || j.detail || j.msg;
+      if (msg && typeof msg === 'string') return msg;
+    } catch {}
+    // Если текст короткий и читабельный — показываем его
+    if (text.length < 200 && !text.startsWith('{') && !text.startsWith('<')) return text;
+  }
+  return HTTP_STATUS_RU[status] || `Ошибка ${status}`;
+}
+
 async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   const url = `/api${path.startsWith('/') ? path : '/' + path}`;
   const headers: any = { 'Content-Type': 'application/json', ...(options.headers || {}) };
@@ -35,7 +62,7 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   if (!res.ok) {
     if (res.status === 401) { clearPanelSecret(); window.location.reload(); }
     const t = await res.text();
-    throw new Error(t || `HTTP ${res.status}`);
+    throw new Error(parseApiError(res.status, t));
   }
   try { return await res.json(); } catch { return null; }
 }
@@ -620,6 +647,7 @@ const UserDetailPage: React.FC<{
   // Modals
   const [banModal, setBanModal] = useState(false);
   const [banReason, setBanReason] = useState('');
+  const [deleteModal, setDeleteModal] = useState(false);
   const [extendModal, setExtendModal] = useState<{ rw_uuid: string; current_expire: string | null } | null>(null);
   const [extendDays, setExtendDays] = useState('');
   const [reduceModal, setReduceModal] = useState<{ rw_uuid: string } | null>(null);
@@ -895,6 +923,13 @@ const UserDetailPage: React.FC<{
               <button className="btn danger" onClick={() => setBanModal(true)}><Ban size={14} /> Заблокировать</button>
             )}
           </div>
+
+          {/* Delete account */}
+          <div className="card" style={{ padding: 20, border: '1px solid var(--danger, #e53e3e)' }}>
+            <h3 className="h-sec mb-2" style={{ color: 'var(--danger, #e53e3e)' }}>Опасная зона</h3>
+            <p className="sub mb-4" style={{ fontSize: 13 }}>Полное удаление аккаунта из базы данных. Это действие необратимо — все данные, ключи и транзакции будут удалены.</p>
+            <button className="btn danger" onClick={() => setDeleteModal(true)}><Trash2 size={14} /> Удалить аккаунт полностью</button>
+          </div>
         </div>
       )}
 
@@ -1115,6 +1150,28 @@ const UserDetailPage: React.FC<{
       )}
 
       {/* ── MODALS ── */}
+      {deleteModal && (
+        <Modal onClose={() => setDeleteModal(false)} title="Удалить аккаунт" icon={Trash2} width={420}
+          footer={<>
+            <button className="btn block" onClick={() => setDeleteModal(false)}>Отмена</button>
+            <button className="btn block danger" disabled={saving === 'delete_account'} onClick={async () => {
+              setSaving('delete_account');
+              try {
+                await apiFetch(`/panel/users/${user.id}/delete`, { method: 'DELETE' });
+                onToast('Аккаунт удалён', undefined, 'success');
+                setDeleteModal(false);
+                onBack();
+              } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
+              setSaving('');
+            }}>
+              {saving === 'delete_account' ? <Spinner size={14} /> : 'Удалить безвозвратно'}
+            </button>
+          </>}
+        >
+          <p style={{ fontSize: 14 }}>Вы уверены, что хотите <b>полностью удалить</b> аккаунт пользователя <b>@{user.username || user.id}</b>?</p>
+          <p className="sub mt-2" style={{ fontSize: 13 }}>Будут удалены: все VPN-ключи (включая в Remnawave), транзакции, сессии, реферальные данные.</p>
+        </Modal>
+      )}
       {banModal && (
         <Modal onClose={() => setBanModal(false)} title="Заблокировать пользователя" icon={Ban} width={400}
           footer={<>
@@ -1768,21 +1825,41 @@ const SquadsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) =>
 
 // ─── SETTINGS PAGE ────────────────────────────────────────────────
 const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) => void; onLogout: () => void }> = ({ onToast, onLogout }) => {
-  const [settings, setSettings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [backupEnabled, setBackupEnabled] = useState(false);
+  const [intervalMin, setIntervalMin] = useState(360);
+  const [lastBackup, setLastBackup] = useState<string | null>(null);
+  const [sendingBackup, setSendingBackup] = useState(false);
 
   useEffect(() => {
-    apiFetch('/panel/settings').then(d => { if (d) setSettings(d); setLoading(false); }).catch(() => setLoading(false));
+    apiFetch('/panel/backups/status').then(d => {
+      if (d) {
+        setBackupEnabled(!!d.enabled);
+        setIntervalMin(d.interval_minutes || 360);
+        setLastBackup(d.last_backup || null);
+      }
+      setLoading(false);
+    }).catch(() => setLoading(false));
   }, []);
 
-  const save = async () => {
+  const saveBackup = async () => {
     setSaving(true);
     try {
-      await apiFetch('/panel/settings', { method: 'PUT', body: JSON.stringify(settings) });
-      onToast('Настройки сохранены', undefined, 'success');
+      await apiFetch('/panel/backups/settings', { method: 'PUT', body: JSON.stringify({ enabled: backupEnabled, interval_minutes: intervalMin }) });
+      onToast('Настройки бэкапов сохранены', undefined, 'success');
     } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
     setSaving(false);
+  };
+
+  const sendBackupNow = async () => {
+    setSendingBackup(true);
+    try {
+      await apiFetch('/panel/backups/create', { method: 'POST' });
+      onToast('Бэкап отправлен в Telegram', undefined, 'success');
+      setLastBackup(new Date().toISOString());
+    } catch (e: any) { onToast('Ошибка отправки бэкапа', e.message, 'error'); }
+    setSendingBackup(false);
   };
 
   const changePassword = async () => {
@@ -1794,30 +1871,75 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
     } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
   };
 
+  const fmtInterval = (min: number) => {
+    if (min < 60) return `${min} мин`;
+    const h = Math.floor(min / 60), m = min % 60;
+    return m > 0 ? `${h} ч ${m} мин` : `${h} ч`;
+  };
+
   if (loading) return <div className="flex items-center justify-center" style={{ height: 200 }}><Spinner size={28} /></div>;
 
   return (
     <div className="flex flex-col gap-6 rise">
-      <div><div className="h-page">Настройки</div><div className="sub mt-1">Конфигурация системы</div></div>
-      {settings && (
-        <div className="card" style={{ padding: 24 }}>
-          <h3 className="h-sec mb-4">Системные параметры</h3>
-          <div className="flex flex-col gap-4">
-            {Object.entries(settings).map(([k, v]) => typeof v !== 'object' && (
-              <div key={k}>
-                <label className="field-label">{k}</label>
-                <input className="input" value={String(v ?? '')} onChange={e => setSettings((prev: any) => ({ ...prev, [k]: e.target.value }))} />
-              </div>
-            ))}
+      <div><div className="h-page">Настройки</div><div className="sub mt-1">Управление системой</div></div>
+
+      {/* Automatic backups */}
+      <div className="card" style={{ padding: 24 }}>
+        <h3 className="h-sec mb-4">Автоматические бэкапы</h3>
+        <p className="sub mb-4" style={{ fontSize: 13 }}>Бэкап базы данных будет отправляться всем администраторам в Telegram ровно в xx:00 выбранного периода.</p>
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              id="backup-enabled"
+              checked={backupEnabled}
+              onChange={e => setBackupEnabled(e.target.checked)}
+              style={{ width: 18, height: 18, cursor: 'pointer' }}
+            />
+            <label htmlFor="backup-enabled" style={{ fontSize: 14, cursor: 'pointer' }}>Включить автоматические бэкапы</label>
           </div>
-          <div className="flex gap-3 mt-5">
-            <button className="btn solid" disabled={saving} onClick={save}>{saving ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}</button>
+          <div>
+            <label className="field-label">Интервал (минуты)</label>
+            <div className="flex items-center gap-3">
+              <input
+                className="input"
+                type="number"
+                min="10"
+                max="10080"
+                value={intervalMin}
+                onChange={e => setIntervalMin(Math.max(10, parseInt(e.target.value) || 360))}
+                style={{ maxWidth: 140 }}
+              />
+              <span className="muted" style={{ fontSize: 13 }}>= {fmtInterval(intervalMin)}</span>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-2">
+              {[60, 180, 360, 720, 1440].map(v => (
+                <button key={v} className={`btn sm ${intervalMin === v ? 'solid' : ''}`} onClick={() => setIntervalMin(v)}>
+                  {fmtInterval(v)}
+                </button>
+              ))}
+            </div>
           </div>
+          {lastBackup && (
+            <div className="sub" style={{ fontSize: 12 }}>
+              Последний бэкап: {new Date(lastBackup).toLocaleString('ru-RU')}
+            </div>
+          )}
         </div>
-      )}
+        <div className="flex gap-3 mt-5 flex-wrap">
+          <button className="btn solid" disabled={saving} onClick={saveBackup}>
+            {saving ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}
+          </button>
+          <button className="btn" disabled={sendingBackup} onClick={sendBackupNow}>
+            {sendingBackup ? <Spinner size={14} /> : <><Database size={14} /> Отправить бэкап сейчас</>}
+          </button>
+        </div>
+      </div>
+
+      {/* Security */}
       <div className="card" style={{ padding: 24 }}>
         <h3 className="h-sec mb-4">Безопасность</h3>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
           <button className="btn" onClick={changePassword}><Lock size={14} /> Изменить пароль</button>
           <button className="btn danger" onClick={onLogout}><X size={14} /> Выйти из системы</button>
         </div>
