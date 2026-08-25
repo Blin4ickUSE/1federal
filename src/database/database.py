@@ -1083,10 +1083,11 @@ def credit_referral_income(user_id: int, purchase_amount: float, description: st
         # Защита от двойного начисления по одному payment_id
         if payment_id:
             cursor.execute(
-                "SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND type = 'referral_income' AND description LIKE ?",
-                (referrer_id, f'%#{payment_id}%'),
+                "SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND type = 'referral_income' AND payment_id = ?",
+                (referrer_id, str(payment_id)),
             )
             if cursor.fetchone()['count'] > 0:
+                conn.close()
                 return None
         # 30% от суммы покупки
         # (дубликат по конкретной транзакции контролирует вызывающий код через payment_id)
@@ -1098,7 +1099,7 @@ def credit_referral_income(user_id: int, purchase_amount: float, description: st
         cursor.execute('\n            UPDATE users SET partner_balance = COALESCE(partner_balance, 0) + ?,\n                           total_earned = total_earned + ?,\n                           updated_at = CURRENT_TIMESTAMP WHERE id = ?\n        ', (income, income, referrer_id))
         pid_suffix = f' [#{payment_id}]' if payment_id else ''
         desc = description or f"Доход от реферала @{row['username'] or user_id}: {income:.0f}₽ ({rate_pct:.0f}% от {purchase_amount:.0f}₽){pid_suffix}"
-        cursor.execute("\n            INSERT INTO transactions (user_id, type, amount, status, description)\n            VALUES (?, 'referral_income', ?, 'Success', ?)\n        ", (referrer_id, income, desc))
+        cursor.execute("\n            INSERT INTO transactions (user_id, type, amount, status, description, payment_id)\n            VALUES (?, 'referral_income', ?, 'Success', ?, ?)\n        ", (referrer_id, income, desc, str(payment_id) if payment_id else None))
         conn.commit()
         return {'referrer_id': referrer_id, 'referrer_telegram_id': row['referrer_telegram_id'], 'income': income, 'rate': rate_pct, 'purchase_amount': purchase_amount}
     except Exception as e:

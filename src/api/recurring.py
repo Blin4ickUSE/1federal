@@ -282,31 +282,6 @@ def extend_vpn_key(
         except Exception as exc:
             logger.error('Developer share accrual on extend failed: %s', exc)
 
-        # Реферальный доход 30% для реферера
-        try:
-            paid = float(amount or 0)
-            if paid > 0:
-                ref_result = database.credit_referral_income(
-                    user_id, paid,
-                    payment_id=str(payment_id) if payment_id else f'rec_{user_id}_{key_id}_{int(_now().timestamp())}',
-                )
-                if ref_result:
-                    logger.info(
-                        'Recurring referral income: %s₽ -> referrer_id=%s',
-                        ref_result['income'], ref_result['referrer_id'],
-                    )
-                    try:
-                        core.send_notification_to_user(
-                            ref_result['referrer_telegram_id'],
-                            f'💰 <b>Реферальный доход!</b>\n\n'
-                            f'Ваш реферал продлил подписку.\n'
-                            f'Ваше вознаграждение: <b>{ref_result["income"]:.0f}₽</b>',
-                        )
-                    except Exception:
-                        pass
-        except Exception as exc:
-            logger.error('Referral income on extend failed: %s', exc)
-
         if notify:
             user = database.get_user_by_id(user_id)
             if user:
@@ -471,14 +446,11 @@ def handle_successful_charge(
         notify=True,
         payment_id=transaction_id,
     )
-    if not ok:
-        logger.error('Successful charge but VPN extend failed sub=%s', sub_id)
-        return False
-
     # Следующая попытка — за 24ч до конца нового периода
+    # ВАЖНО: обновляем next_charge_at СРАЗУ после успешного списания,
+    # даже если extend_vpn_key упал — иначе подписка будет снова списываться каждую минуту
     new_expiry_dt = _now() + timedelta(days=days)
     next_charge = _iso(new_expiry_dt + timedelta(hours=PRE_EXPIRY_SCHEDULE_HOURS[0]))
-
     database.update_recurring_subscription(
         sub_id,
         status='ACTIVE',
@@ -493,6 +465,32 @@ def handle_successful_charge(
         tariff_category=sub.get('tariff_category') if converts else None,
         devices_limit=devices if converts else None,
     )
+
+    if not ok:
+        logger.error('Successful charge but VPN extend failed sub=%s — next_charge_at still updated to prevent loop', sub_id)
+        return False
+
+    # Реферальный доход — начисляем здесь, используя transaction_id как dedup ключ
+    # (transaction_id уникален per CloudPayments платёж)
+    try:
+        if charge_amount > 0 and transaction_id:
+            ref_result = database.credit_referral_income(
+                user_id, charge_amount,
+                payment_id=str(transaction_id),
+            )
+            if ref_result:
+                logger.info('Referral income %s₽ → referrer_id=%s (recurring)', ref_result['income'], ref_result['referrer_id'])
+                try:
+                    core.send_notification_to_user(
+                        ref_result['referrer_telegram_id'],
+                        f'💰 <b>Реферальный доход!</b>\n\nВаш реферал продлил подписку.\n'
+                        f'Ваше вознаграждение: <b>{ref_result["income"]:.0f}₽</b>',
+                    )
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.error('Referral income in handle_successful_charge failed: %s', exc)
+
     if transaction_id:
         logger.info('Recurring %s charged ok tx=%s', sub_id, transaction_id)
     return True
@@ -515,10 +513,11 @@ def _charge_one(sub: Dict[str, Any]) -> None:
     sub_id = sub['subscription_id']
     user_id = int(sub['user_id'])
 
-    # Захватываем слот, чтобы параллельный воркер не списал дважды
+    # Захватываем слот на 30 минут — если что-то пойдёт не так,
+    # handle_successful_charge обновит next_charge_at на ~30 дней вперёд
     database.update_recurring_subscription(
         sub_id,
-        next_charge_at=_iso(_now() + timedelta(minutes=10)),
+        next_charge_at=_iso(_now() + timedelta(minutes=30)),
     )
 
     token = (sub.get('card_token') or '').strip()
