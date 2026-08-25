@@ -1,5 +1,4 @@
 """Outbound email via project SMTP (docker mail service)."""
-import email.utils
 import logging
 import os
 import smtplib
@@ -23,8 +22,6 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
     msg['From'] = MAIL_FROM
     msg['To'] = to_email
     msg['Subject'] = subject
-    msg['Message-ID'] = email.utils.make_msgid(domain=MAIL_DOMAIN)
-    msg['Date'] = email.utils.formatdate(localtime=False)
     msg.set_content(body)
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
@@ -43,7 +40,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
-def send_otp_email(to_email: str, code: str, purpose: str = 'verify') -> bool:
+def send_otp_email(to_email: str, code: str, purpose: str='verify') -> bool:
     purpose_labels = {
         'register': 'регистрации',
         'login': 'входа',

@@ -81,7 +81,7 @@ def init_database():
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("\n            CREATE TABLE IF NOT EXISTS users (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                telegram_id INTEGER UNIQUE,\n                email TEXT UNIQUE,\n                password_hash TEXT,\n                email_verified_at TIMESTAMP,\n                username TEXT,\n                full_name TEXT,\n                balance REAL DEFAULT 0,\n                status TEXT DEFAULT 'Trial',\n                registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                paid_until TIMESTAMP,\n                referral_code TEXT UNIQUE,\n                referred_by INTEGER,\n                is_partner INTEGER DEFAULT 0,\n                partner_rate INTEGER DEFAULT 30,\n                partner_balance REAL DEFAULT 0,\n                total_earned REAL DEFAULT 0,\n                trial_used INTEGER DEFAULT 0,\n                banned_keys_count INTEGER DEFAULT 0,\n                is_banned INTEGER DEFAULT 0,\n                ban_reason TEXT,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (referred_by) REFERENCES users(id)\n            )\n        ")
+        cursor.execute("\n            CREATE TABLE IF NOT EXISTS users (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                telegram_id INTEGER UNIQUE,\n                email TEXT UNIQUE,\n                password_hash TEXT,\n                email_verified_at TIMESTAMP,\n                username TEXT,\n                full_name TEXT,\n                balance REAL DEFAULT 0,\n                status TEXT DEFAULT 'Trial',\n                registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                paid_until TIMESTAMP,\n                referral_code TEXT UNIQUE,\n                referred_by INTEGER,\n                is_partner INTEGER DEFAULT 0,\n                partner_rate INTEGER DEFAULT 20,\n                partner_balance REAL DEFAULT 0,\n                total_earned REAL DEFAULT 0,\n                trial_used INTEGER DEFAULT 0,\n                banned_keys_count INTEGER DEFAULT 0,\n                is_banned INTEGER DEFAULT 0,\n                ban_reason TEXT,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (referred_by) REFERENCES users(id)\n            )\n        ")
         try:
             cursor.execute('ALTER TABLE users ADD COLUMN promo_discount_percent REAL')
         except sqlite3.OperationalError:
@@ -147,11 +147,7 @@ def init_database():
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS payment_fees (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                payment_method TEXT UNIQUE NOT NULL,\n                fee_percent REAL DEFAULT 0.0,\n                fee_fixed REAL DEFAULT 0.0,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS saved_payment_methods (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                payment_provider TEXT NOT NULL,\n                payment_method_id TEXT NOT NULL,\n                payment_method_type TEXT,\n                card_last4 TEXT,\n                card_brand TEXT,\n                is_active INTEGER DEFAULT 1,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                FOREIGN KEY (user_id) REFERENCES users(id),\n                UNIQUE(user_id, payment_provider, payment_method_id)\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS payment_provider_settings (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                provider TEXT NOT NULL,\n                setting_key TEXT NOT NULL,\n                setting_value TEXT,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                UNIQUE(provider, setting_key)\n            )\n        ')
-        cursor.execute('\n            CREATE TABLE IF NOT EXISTS backup_settings (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                enabled INTEGER DEFAULT 0,\n                interval_hours INTEGER DEFAULT 6,\n                interval_minutes INTEGER DEFAULT 360,\n                last_backup TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
-        try:
-            cursor.execute('ALTER TABLE backup_settings ADD COLUMN interval_minutes INTEGER DEFAULT 360')
-        except Exception:
-            pass
+        cursor.execute('\n            CREATE TABLE IF NOT EXISTS backup_settings (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                enabled INTEGER DEFAULT 0,\n                interval_hours INTEGER DEFAULT 12,\n                last_backup TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS squad_configs (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                squad_uuid TEXT UNIQUE NOT NULL,\n                squad_name TEXT NOT NULL,\n                squad_type TEXT NOT NULL,\n                max_users INTEGER DEFAULT 0,\n                current_users INTEGER DEFAULT 0,\n                is_active INTEGER DEFAULT 1,\n                priority INTEGER DEFAULT 0,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS subscription_squad_mapping (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                subscription_type TEXT NOT NULL,\n                squad_uuid TEXT NOT NULL,\n                is_active INTEGER DEFAULT 1,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                UNIQUE(subscription_type, squad_uuid)\n            )\n        ')
         cursor.execute('\n            CREATE TABLE IF NOT EXISTS panel_admins (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                username TEXT UNIQUE NOT NULL,\n                password_hash TEXT NOT NULL,\n                is_active INTEGER DEFAULT 1,\n                last_login TIMESTAMP,\n                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n            )\n        ')
@@ -1056,16 +1052,12 @@ def credit_referral_income(user_id: int, purchase_amount: float, description: st
         existing_count = cursor.fetchone()['count']
         if existing_count > 0:
             return None
-        # 30% от суммы покупки
-        rate_pct = float(row['partner_rate'] or 30)
-        income = round(float(purchase_amount or 0) * rate_pct / 100, 2)
-        if income <= 0:
-            return None
+        income = 50.0
         cursor.execute('\n            UPDATE users SET partner_balance = COALESCE(partner_balance, 0) + ?,\n                           total_earned = total_earned + ?,\n                           updated_at = CURRENT_TIMESTAMP WHERE id = ?\n        ', (income, income, referrer_id))
-        desc = description or f"Доход от реферала @{row['username'] or user_id}: {income:.0f}₽ ({rate_pct:.0f}% от {purchase_amount:.0f}₽)"
+        desc = description or f"Доход от реферала @{row['username'] or user_id}: 50₽ за приглашение"
         cursor.execute("\n            INSERT INTO transactions (user_id, type, amount, status, description)\n            VALUES (?, 'referral_income', ?, 'Success', ?)\n        ", (referrer_id, income, desc))
         conn.commit()
-        return {'referrer_id': referrer_id, 'referrer_telegram_id': row['referrer_telegram_id'], 'income': income, 'rate': rate_pct, 'purchase_amount': purchase_amount}
+        return {'referrer_id': referrer_id, 'referrer_telegram_id': row['referrer_telegram_id'], 'income': income, 'rate': 0, 'purchase_amount': purchase_amount}
     except Exception as e:
         logger.error(f'Referral income error: {e}')
         conn.rollback()

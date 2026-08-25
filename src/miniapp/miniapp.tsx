@@ -478,7 +478,7 @@ const PRIVACY_POLICY_TEXT = `
 `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
-  { id: 'trial_7d', duration: 'Пробная подписка', price: 10, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'trial_7d', duration: 'Пробная подписка', price: 1, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
   { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 499, benefitPercent: 0 },
   { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
   { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.9 },
@@ -1622,7 +1622,7 @@ export default function App() {
         />
         <div className="relative">
           <h3 className="text-base font-bold text-white uppercase tracking-wide mb-2">
-            Пробный период за 10₽
+            Пробный период за 1₽
           </h3>
           <p className="text-sm text-gray-400 mb-6">
             7 дней доступа · далее 499₽/мес с привязанной карты
@@ -1633,7 +1633,7 @@ export default function App() {
               <div className="text-xs text-gray-500 mt-1">дней</div>
             </div>
             <div>
-              <div className="text-3xl font-bold text-white leading-none">10₽</div>
+              <div className="text-3xl font-bold text-white leading-none">1₽</div>
               <div className="text-xs text-gray-500 mt-1">сейчас</div>
             </div>
             <div>
@@ -1645,7 +1645,7 @@ export default function App() {
             onClick={activateTrial}
             className="w-full py-3.5 rounded-full bg-blue-500 hover:bg-blue-600 text-white font-semibold text-sm transition-colors shadow-[0_4px_24px_rgba(59,130,246,0.35)]"
           >
-            Попробовать за 10₽
+            Попробовать за 1₽
           </button>
         </div>
       </div>
@@ -2096,7 +2096,7 @@ export default function App() {
       : priceAfterPromoDiscount(wizardPlan.price);
     const tariffLabel = wizardPlan.tariffCategory === 'family' ? 'Семейный' : 'Обычный';
     const name = wizardPlan.isTrial
-      ? 'Пробная подписка 7 дней за 10₽'
+      ? 'Пробная подписка 7 дней за 1₽'
       : `${tariffLabel} (${wizardPlan.duration})`;
 
     if (wizardPlan.isTrial || price > 0) {
@@ -2480,7 +2480,7 @@ export default function App() {
                   </div>
                 )}
                 {wizardPlan?.isTrial && (
-                  <div className="text-sm text-gray-500 mb-6">7 дней за 10₽ · далее 499₽/мес · до 2 устройств</div>
+                  <div className="text-sm text-gray-500 mb-6">7 дней за 1₽ · далее 499₽/мес · до 2 устройств</div>
                 )}
 
                 <div className="border-t border-white/10 pt-4 flex justify-between items-center">
@@ -2532,7 +2532,7 @@ export default function App() {
                       : wizardPlan?.id === 'promo_sub'
                       ? 'Активировать бесплатно'
                       : wizardPlan?.isTrial
-                      ? 'Оплатить 10 ₽'
+                      ? 'Оплатить 1 ₽'
                       : `Оплатить ${priceAfterPromoDiscount(wizardPlan?.price || 0)} ₽`}
                 </Button>
             </div>
@@ -3605,4 +3605,4 @@ export default function App() {
 
     </div>
   );
-    }
+  }
