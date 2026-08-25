@@ -520,11 +520,11 @@ def get_user_info():
             'balance': user.get('balance', 0),
             'status': user.get('status', 'Trial'),
             'referral_code': user.get('referral_code'),
-            'partner_balance': stats.get('partner_balance', 0),
-            'referral_balance': stats.get('partner_balance', 0),
+            'partner_balance': float(user.get('partner_balance') or 0),
+            'referral_balance': float(user.get('partner_balance') or 0),
             'referrals_count': stats.get('referrals_count', 0),
-            'referral_earned': stats.get('partner_balance', 0),
-            'referral_rate': stats.get('rate', 20),
+            'referral_earned': float(user.get('total_earned') or 0),
+            'referral_rate': float(user.get('partner_rate') or stats.get('rate') or 30),
             'referral_withdraw_blocked': bool(user.get('referral_withdraw_blocked')),
             'is_new_user': False,
             'trial_used': user.get('trial_used', 0),
@@ -642,7 +642,7 @@ def create_payment(_user=None):
 
     if is_trial:
         days = 7
-        amount = 1.0
+        amount = 10.0
         plan_type = 'vpn_regular'
         tariff_category = 'regular'
         devices_limit = 2
@@ -655,7 +655,7 @@ def create_payment(_user=None):
     # Все платные тарифы — счёт CloudPayments (оплата на orders.cloudpayments.ru)
     invoice_id = f'inv_{uuid_lib.uuid4().hex[:20]}'
     description = (
-        '1FEDERAL VPN — пробный период 7 дней за 1₽'
+        '1FEDERAL VPN — пробный период 7 дней за 10₽'
         if is_trial
         else f'1FEDERAL VPN — подписка на {days} дн.'
     )
@@ -857,8 +857,8 @@ def get_user_history(_user=None):
         rows = cursor.fetchall()
         history = []
         for row in rows:
-            type_map = {'deposit': 'deposit', 'withdrawal': 'withdrawal', 'subscription': 'sub_off', 'device_purchase': 'buy_dev', 'trial': 'trial'}
-            title_map = {'deposit': f"Пополнение баланса ({row['payment_method'] or ''})", 'withdrawal': 'Вывод средств', 'subscription': 'Списание за подписку', 'device_purchase': 'Покупка устройства', 'trial': 'Активация пробного периода'}
+            type_map = {'subscription': 'payment', 'subscription_extend': 'renewal'}
+            title_map = {'subscription': 'Покупка подписки', 'subscription_extend': 'Продление подписки'}
             trans_type = type_map.get(row['type'], row['type'])
             title = row['description'] or title_map.get(row['type'], row['type'])
             from datetime import datetime
@@ -964,10 +964,6 @@ def extend_subscription(_user=None):
         key_uuid = key_row['key_uuid']
         current_expiry = key_row['expiry_date']
         plan_type = key_row['plan_type'] or 'vpn'
-        if price > 0:
-            deducted = database.update_user_balance(user_id, -price, ensure_non_negative=True)
-            if not deducted:
-                return (jsonify({'error': 'Insufficient balance'}), 400)
         from datetime import datetime, timedelta
         if current_expiry:
             try:
@@ -986,22 +982,25 @@ def extend_subscription(_user=None):
                 remnawave.remnawave_api.update_user_sync(uuid=key_uuid, expire_at=new_expiry, status=remnawave.UserStatus.ACTIVE)
             except Exception as e:
                 logger.error(f'Failed to update key in Remnawave: {e}')
-                if price > 0:
-                    database.update_user_balance(user_id, price)
                 return (jsonify({'error': 'Failed to extend subscription in VPN system'}), 500)
         cursor.execute("\n            UPDATE vpn_keys SET \n                status = 'Active',\n                expiry_date = ?\n            WHERE id = ?\n        ", (new_expiry_str, key_id))
         conn.commit()
         description = f'Продление подписки ({days} дней)'
-        cursor.execute("\n            INSERT INTO transactions (user_id, type, amount, status, description, payment_method, duration_days)\n            VALUES (?, 'subscription_extend', ?, 'Success', ?, 'Balance', ?)\n        ", (user_id, -price, description, int(days)))
+        # Транзакция за продление уже записана webhook'ом CloudPayments.
+        # Для бесплатных/промо случаев — записываем.
+        conn.commit()
+        # Обновляем статус пользователя
+        cursor.execute("UPDATE users SET status = 'Active' WHERE id = ?", (user_id,))
         conn.commit()
         if price > 0:
-            referral_result = database.credit_referral_income(user_id, price, f'Доход от продления подписки ({description})')
+            req_payment_id = (request.json or {}).get('payment_id') or str(user_id) + '_ext_' + str(int(__import__('time').time()))
+            referral_result = database.credit_referral_income(user_id, price, f'Доход от продления подписки ({description})', payment_id=req_payment_id)
             if referral_result:
                 logger.info(f"Credited {referral_result['income']}₽ to referrer for extension")
                 try:
                     referrer_telegram_id = referral_result['referrer_telegram_id']
                     income = referral_result['income']
-                    msg = f'💰 <b>Реферальный доход!</b>\n\nВаш реферал совершил первую покупку.\nВаше вознаграждение: <b>{income:.0f}₽</b>\n\nСредства зачислены на ваш основной баланс.'
+                    msg = f'💰 <b>Реферальный доход!</b>\n\nВаш реферал оплатил подписку.\nВаше вознаграждение: <b>{income:.0f}₽</b>'
                     core.send_notification_to_user(referrer_telegram_id, msg)
                 except Exception as e:
                     logger.error(f'Failed to notify referrer: {e}')
@@ -1080,10 +1079,10 @@ def create_subscription(_user=None):
             if user.get('trial_used', 0) == 1:
                 return (jsonify({'error': 'Пробный период уже использован'}), 400)
             days = int(data.get('days', 7) or 7)
-            # Платный пробный период 7 дней за 1₽ (карта уже привязана)
-            price = float(data.get('price', 1) or 1)
+            # Платный пробный период 7 дней за 10₽ (карта уже привязана)
+            price = float(data.get('price', 10) or 10)
             if price <= 0:
-                price = 1.0
+                price = 10.0
             devices_limit = int(data.get('devices_limit', 2) or 2)
             plan_type = 'vpn_regular'
             tariff_category = 'regular'
@@ -1093,32 +1092,54 @@ def create_subscription(_user=None):
             if disc_pct > 0 and base_price > 0:
                 price = round(base_price * (1 - min(disc_pct, 100) / 100), 2)
                 had_promo_discount = True
+    logger.info(f"create_subscription called for user_id={user_id}, days={days}, is_trial={is_trial}, price={price}")
+
     if price > 0:
-        deducted = database.update_user_balance(user_id, -price, ensure_non_negative=True)
-        if not deducted:
-            return (jsonify({'error': 'Insufficient balance'}), 400)
-    logger.info(f"Creating subscription for user_id={user_id}, telegram_id={user['telegram_id']}, days={days}, is_trial={is_trial}")
+        # Платный случай: VPN-ключ уже создан webhook'ом CloudPayments (handle_pay).
+        # Этот эндпоинт просто подтверждает что ключ есть.
+        existing_key = database.get_active_vpn_key_for_user(user_id)
+        if existing_key:
+            logger.info(f'create_subscription: key already exists key_id={existing_key["id"]} (created by webhook)')
+            return jsonify({'success': True, 'subscription': {'key_id': existing_key['id'], 'remnawave_uuid': existing_key['key_uuid']}})
+        # Ключ ещё не создан (webhook не успел) — попробуем создать
+        logger.warning('create_subscription: key not found yet after paid payment, creating manually')
+
+    # Для бесплатных подписок (промокод) или если ключ не был создан webhook'ом
+    PAID_TRAFFIC_BYTES = int(10 * 1024 ** 4)  # 10 TB
+    TRIAL_TRAFFIC_BYTES = int(10 * 1024 ** 3)  # 10 GB
     if is_trial:
-        traffic_limit_bytes = int(10 * 1024 ** 3)
-        result = core.create_user_and_subscription(user.get('telegram_id'), user.get('username', ''), days, traffic_limit=traffic_limit_bytes, plan_type=plan_type, devices_limit=devices_limit, force_new=False, email=user.get('email'), existing_user_id=user_id)
+        traffic_limit_bytes = TRIAL_TRAFFIC_BYTES
+        actual_devices = 1
     else:
-        result = core.create_user_and_subscription(user.get('telegram_id'), user.get('username', ''), days, traffic_limit=0, plan_type=plan_type, devices_limit=devices_limit, force_new=False, email=user.get('email'), existing_user_id=user_id)
+        traffic_limit_bytes = PAID_TRAFFIC_BYTES
+        actual_devices = devices_limit
+
+    result = core.create_user_and_subscription(
+        user.get('telegram_id'), user.get('username', ''), days,
+        traffic_limit=traffic_limit_bytes, plan_type=plan_type,
+        devices_limit=actual_devices, force_new=False,
+        email=user.get('email'), existing_user_id=user_id,
+    )
     logger.info(f'Subscription creation result: {result is not None}, result={result}')
     if result:
         conn = database.get_db_connection()
         cursor = conn.cursor()
         if is_trial:
-            cursor.execute('UPDATE users SET trial_used = 1 WHERE id = ?', (user_id,))
-            description = f'Пробная подписка 7 дней за 1₽'
-            trans_type = 'trial'
+            cursor.execute("UPDATE users SET trial_used = 1, status = 'Trial' WHERE id = ?", (user_id,))
+            description = f'Пробная подписка {days} дней'
         else:
+            cursor.execute("UPDATE users SET status = 'Active' WHERE id = ?", (user_id,))
             if finalize_promo_id:
                 description = f'Подписка по промокоду ({days} дней)'
             else:
                 tariff_label = 'Семейный' if tariff_category == 'family' else 'Обычный'
                 description = f'{tariff_label} тариф ({days} дней)'
-            trans_type = 'subscription'
-        cursor.execute("\n            INSERT INTO transactions (user_id, type, amount, status, description, payment_method, duration_days)\n            VALUES (?, ?, ?, 'Success', ?, 'Balance', ?)\n        ", (user_id, trans_type, -price, description, int(days)))
+        # Вставляем транзакцию только для бесплатных (промо) случаев
+        if price == 0:
+            cursor.execute("""
+                INSERT INTO transactions (user_id, type, amount, status, description, payment_method, duration_days)
+                VALUES (?, 'subscription', 0, 'Success', ?, 'Promo', ?)
+            """, (user_id, description, int(days)))
         conn.commit()
         conn.close()
         if not is_trial and had_promo_discount:
@@ -1127,13 +1148,14 @@ def create_subscription(_user=None):
             if not database.finalize_promo_subscription_use(user_id, finalize_promo_id):
                 logger.error('finalize_promo_subscription_use failed user_id=%s promo_id=%s', user_id, finalize_promo_id)
         if not is_trial and price > 0:
-            referral_result = database.credit_referral_income(user_id, price, f'Доход от покупки подписки ({description})')
+            req_payment_id2 = (request.json or {}).get('payment_id') or str(user_id) + '_sub_' + str(int(__import__('time').time()))
+            referral_result = database.credit_referral_income(user_id, price, f'Доход от покупки подписки ({description})', payment_id=req_payment_id2)
             if referral_result:
                 logger.info(f"Credited {referral_result['income']}₽ to referrer {referral_result['referrer_telegram_id']}")
                 try:
                     referrer_telegram_id = referral_result['referrer_telegram_id']
                     income = referral_result['income']
-                    msg = f'💰 <b>Реферальный доход!</b>\n\nВаш реферал совершил первую покупку.\nВаше вознаграждение: <b>{income:.0f}₽</b>\n\nСредства зачислены на ваш основной баланс.'
+                    msg = f'💰 <b>Реферальный доход!</b>\n\nВаш реферал оплатил подписку.\nВаше вознаграждение: <b>{income:.0f}₽</b>'
                     core.send_notification_to_user(referrer_telegram_id, msg)
                 except Exception as e:
                     logger.error(f'Failed to notify referrer: {e}')
@@ -1143,9 +1165,42 @@ def create_subscription(_user=None):
             except Exception as e:
                 logger.error('Failed to link recurring subscription to key: %s', e)
         return jsonify({'success': True, 'subscription': result})
-    if price > 0:
-        database.update_user_balance(user_id, price)
     return (jsonify({'error': 'Failed to create subscription'}), 500)
+
+
+def _compute_user_status(user_id: int, trial_used: int, is_banned: int, cursor) -> str:
+    """Вычислить статус пользователя по активным ключам."""
+    if is_banned:
+        return 'Banned'
+    cursor.execute(
+        """
+        SELECT plan_type, expiry_date, status
+        FROM vpn_keys
+        WHERE user_id = ?
+        ORDER BY expiry_date DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    key = cursor.fetchone()
+    if not key:
+        # Никогда не было подписки
+        return 'None'
+    exp = key['expiry_date']
+    is_active = key['status'] == 'Active'
+    if exp:
+        try:
+            from datetime import datetime
+            exp_dt = datetime.fromisoformat(str(exp).replace('Z', '+00:00').replace('+00:00', ''))
+            is_active = is_active and exp_dt > datetime.now()
+        except Exception:
+            pass
+    if not is_active:
+        return 'Expired'
+    # Активный ключ: если триал ещё не завершён — Trial, иначе Active
+    if not trial_used:
+        return 'Trial'
+    return 'Active'
 
 @app.route('/api/panel/users', methods=['GET'])
 
@@ -1161,8 +1216,33 @@ def get_users():
     cursor.execute('SELECT telegram_id FROM blacklist')
     blacklisted_ids = set((row['telegram_id'] for row in cursor.fetchall()))
     conn.close()
+    conn2 = database.get_db_connection()
+    cursor2 = conn2.cursor()
     for user in raw_users:
         user['in_blacklist'] = user.get('telegram_id') in blacklisted_ids
+        user['status'] = _compute_user_status(
+            user['id'], int(user.get('trial_used') or 0),
+            int(user.get('is_banned') or 0), cursor2
+        )
+        # Добавляем данные активного ключа прямо в список
+        cursor2.execute(
+            """
+            SELECT expiry_date, traffic_used, traffic_limit
+            FROM vpn_keys WHERE user_id = ? AND status = 'Active'
+            ORDER BY expiry_date DESC LIMIT 1
+            """,
+            (user['id'],),
+        )
+        key_row = cursor2.fetchone()
+        if key_row:
+            user['expiry_date'] = key_row['expiry_date']
+            user['traffic_used'] = key_row['traffic_used']
+            user['traffic_limit'] = key_row['traffic_limit']
+        else:
+            user['expiry_date'] = None
+            user['traffic_used'] = None
+            user['traffic_limit'] = None
+    conn2.close()
     return jsonify({'users': raw_users, 'total': total, 'limit': limit, 'offset': offset})
 
 @app.route('/api/panel/promocodes', methods=['GET'])
@@ -1422,12 +1502,17 @@ def get_transactions():
     conn = database.get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("\n            SELECT \n                t.id,\n                t.user_id,\n                u.username,\n                t.type,\n                t.amount,\n                t.status,\n                t.payment_method,\n                t.payment_provider,\n                t.payment_id,\n                t.hash,\n                t.created_at\n            FROM transactions t\n            LEFT JOIN users u ON t.user_id = u.id\n            WHERE t.type IN ('deposit', 'withdrawal_request')\n              AND t.status = 'Success'\n              AND t.payment_method != 'Admin'\n            ORDER BY t.created_at DESC\n            LIMIT ? OFFSET ?\n        ", (limit, offset))
+        cursor.execute("\n            SELECT \n                t.id,\n                t.user_id,\n                u.username,\n                t.type,\n                t.amount,\n                t.status,\n                t.payment_method,\n                t.payment_provider,\n                t.payment_id,\n                t.hash,\n                t.created_at\n            FROM transactions t\n            LEFT JOIN users u ON t.user_id = u.id\n            WHERE t.type IN ('subscription', 'subscription_extend')\n              AND t.status = 'Success'\n              AND COALESCE(t.payment_method, '') NOT IN ('Admin', 'Balance', 'Promo')\n              AND ABS(COALESCE(t.amount, 0)) > 0\n            ORDER BY t.created_at DESC\n            LIMIT ? OFFSET ?\n        ", (limit, offset))
         rows = cursor.fetchall()
         transactions = []
         for row in rows:
             username = row['username'] or f"user_{row['user_id']}"
-            transactions.append({'id': row['id'], 'user_id': row['user_id'], 'user': f'@{username}' if username and (not username.startswith('@')) else username, 'amount': float(row['amount']), 'type': row['type'], 'status': row['status'] or 'Pending', 'payment_method': row['payment_method'] or 'Unknown', 'payment_provider': row['payment_provider'] or '', 'payment_id': row['payment_id'] or '', 'hash': row['hash'] or row['payment_id'] or '', 'created_at': row['created_at']})
+            amount_val = abs(float(row['amount'] or 0))
+            if amount_val <= 0:
+                continue  # пропускаем нулевые/мусорные записи
+            desc_lower = (row.get('description') or '').lower()
+            is_trial_tx = 'пробн' in desc_lower or 'триал' in desc_lower or 'trial' in desc_lower
+            transactions.append({'id': row['id'], 'user_id': row['user_id'], 'user': f'@{username}' if username and (not username.startswith('@')) else username, 'amount': amount_val, 'type': 'trial' if is_trial_tx else row['type'], 'status': row['status'] or 'Pending', 'payment_method': row['payment_method'] or 'Unknown', 'payment_provider': row['payment_provider'] or '', 'payment_id': row['payment_id'] or '', 'hash': row['hash'] or row['payment_id'] or '', 'created_at': row['created_at']})
         return jsonify(transactions)
     finally:
         conn.close()
@@ -1444,16 +1529,16 @@ def refund_transaction(transaction_id: int):
         transaction = cursor.fetchone()
         if not transaction:
             return (jsonify({'success': False, 'error': 'Транзакция не найдена'}), 404)
-        if transaction['type'] != 'deposit':
-            return (jsonify({'success': False, 'error': 'Возврат возможен только для пополнений'}), 400)
+        if transaction['type'] not in ('subscription', 'subscription_extend'):
+            return (jsonify({'success': False, 'error': 'Возврат возможен только для платежей за подписку'}), 400)
         if transaction['status'] == 'Refunded':
             return (jsonify({'success': False, 'error': 'Транзакция уже была возвращена'}), 400)
         if transaction['status'] not in ('Success', 'Completed', 'Paid'):
             return (jsonify({'success': False, 'error': f'Нельзя вернуть статус {transaction["status"]}'}), 400)
 
-        amount = float(transaction['amount'])
+        amount = abs(float(transaction['amount'] or 0))
         if amount <= 0:
-            return (jsonify({'success': False, 'error': 'Некорректная сумма'}), 400)
+            return (jsonify({'success': False, 'error': 'Некорректная сумма транзакции'}), 400)
         user_id = transaction['user_id']
         payment_id = (transaction['payment_id'] or transaction['hash'] or '').strip()
         payment_provider = (transaction['payment_provider'] or '').strip()
@@ -1470,10 +1555,7 @@ def refund_transaction(transaction_id: int):
                 }), 502)
 
         user = database.get_user_by_id(user_id)
-        if user and transaction['type'] == 'deposit':
-            current_balance = float(user.get('balance', 0) or 0)
-            new_balance = max(0.0, current_balance - amount)
-            cursor.execute('UPDATE users SET balance = ? WHERE id = ?', (new_balance, user_id))
+        # Нет системы баланса — при возврате просто помечаем транзакцию
 
         cursor.execute(
             "UPDATE transactions SET status = 'Refunded' WHERE id = ?",
@@ -1886,11 +1968,47 @@ def get_user_remnawave_devices(user_id: int):
     try:
         api = remnawave.get_remnawave_api()
         import asyncio
-        async def _fetch():
+
+        async def _fetch_user():
             async with api as a:
-                return await a._make_request('GET', f'/api/users/{rw_uuid}/hwid')
-        resp = asyncio.run(_fetch())
-        devices = resp.get('response', [])
+                # Получаем сырой объект пользователя — устройства могут быть вложены в него
+                user_raw = await a.get_user_raw(rw_uuid)
+                logger.debug(f'RW user keys for {rw_uuid}: {list(user_raw.keys()) if isinstance(user_raw, dict) else type(user_raw)}')
+                return user_raw
+
+        resp = asyncio.run(_fetch_user())
+
+        # Ищем HWID-устройства во всех возможных местах ответа (get_user_raw уже убрал обёртку)
+        user_data = resp if isinstance(resp, dict) else {}
+        if isinstance(user_data, dict):
+            # Пробуем все известные поля где Remnawave может хранить устройства
+            devices = (
+                user_data.get('hwids') or
+                user_data.get('hwidDevices') or
+                user_data.get('devices') or
+                user_data.get('activeDevices') or
+                user_data.get('connectedDevices') or
+                []
+            )
+            # Если устройств нет в прямых полях — смотрим вложенный userTraffic
+            if not devices:
+                traffic = user_data.get('userTraffic') or {}
+                devices = traffic.get('hwids') or traffic.get('devices') or []
+        elif isinstance(user_data, list):
+            devices = user_data
+        else:
+            devices = []
+
+        if not isinstance(devices, list):
+            devices = []
+
+        # Если нет устройств — возвращаем мета-информацию из пользователя для отладки
+        if not devices and isinstance(user_data, dict):
+            hwid_limit = user_data.get('hwidDeviceLimit')
+            logger.info(f'HWID devices for {rw_uuid}: 0 found, hwidDeviceLimit={hwid_limit}, user_keys={list(user_data.keys())[:15]}')
+        else:
+            logger.info(f'HWID devices for {rw_uuid}: {len(devices)} found')
+
         return jsonify(devices)
     except Exception as e:
         logger.warning(f'Failed to fetch HWID devices for {rw_uuid}: {e}')
@@ -2009,6 +2127,12 @@ def panel_update_user(user_id: int):
             notification_msg = '✅ Ваш аккаунт разблокирован!'
             return jsonify({'success': True})
 
+        elif field == 'reset_trial':
+            cursor.execute("UPDATE users SET trial_used = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (user_id,))
+            conn.commit()
+            notification_msg = '🎁 Ваш пробный период сброшен — вы снова можете воспользоваться триалом!'
+            return jsonify({'success': True})
+
         elif field == 'set_email':
             email = (str(value or '')).strip().lower() or None
             if email:
@@ -2022,14 +2146,19 @@ def panel_update_user(user_id: int):
                 if not ok:
                     return jsonify({'error': 'Не удалось сохранить email'}), 400
             else:
+                # Нельзя отвязать email, если нет Telegram
+                if not user.get('telegram_id'):
+                    return jsonify({'error': 'Нельзя отвязать email: у пользователя нет привязанного Telegram'}), 400
                 database.clear_user_email(user_id)
             return jsonify({'success': True, 'email': email})
 
         elif field == 'set_telegram':
             raw = str(value or '').strip()
             if not raw:
-                if not (user['email'] if 'email' in user.keys() else None):
-                    return jsonify({'error': 'Нельзя отвязать Telegram без email'}), 400
+                # Re-fetch user to get latest data
+                fresh = database.get_user_by_id(user_id)
+                if not fresh or not fresh.get('email'):
+                    return jsonify({'error': 'Нельзя отвязать Telegram: у пользователя нет привязанного email'}), 400
                 database.clear_user_telegram(user_id)
                 return jsonify({'success': True, 'telegram_id': None})
             try:
@@ -2214,6 +2343,45 @@ def get_user_referrals_full(user_id: int):
         return jsonify(referrals)
     finally:
         conn.close()
+
+
+@app.route('/api/panel/users/<int:user_id>/delete', methods=['DELETE'])
+@require_auth
+def delete_panel_user(user_id: int):
+    """Полное удаление пользователя из БД (включая ключи в Remnawave)."""
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id, telegram_id, username FROM users WHERE id = ?', (user_id,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            conn.close()
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        cursor.execute("SELECT key_uuid FROM vpn_keys WHERE user_id = ? AND key_uuid IS NOT NULL", (user_id,))
+        key_uuids = [r['key_uuid'] for r in cursor.fetchall()]
+        conn.close()
+        rw_errors = []
+        for ku in key_uuids:
+            try:
+                remnawave.remnawave_api.delete_user_sync(ku)
+            except Exception as e:
+                rw_errors.append(str(e))
+                logger.warning(f'delete_panel_user: Remnawave delete {ku} failed: {e}')
+        database.purge_user_from_database(user_id)
+        logger.info(f'Panel admin deleted user id={user_id} tg={user_row["telegram_id"]} rw_errors={rw_errors}')
+        return jsonify({
+            'success': True,
+            'deleted_user_id': user_id,
+            'deleted_rw_keys': len(key_uuids),
+            'rw_errors': rw_errors,
+        })
+    except Exception as e:
+        logger.error(f'delete_panel_user error: {e}')
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/panel/keys', methods=['GET'])
@@ -2500,11 +2668,11 @@ def get_user_referrals(_user=None):
     try:
         cursor.execute('\n            SELECT id, username, full_name, registration_date\n            FROM users\n            WHERE referred_by = ?\n            ORDER BY registration_date DESC\n            ', (user['id'],))
         referrals_rows = cursor.fetchall()
-        rate = user.get('partner_rate', 20) / 100
+        rate = user.get('partner_rate', 30) / 100
         referrals = []
         for r in referrals_rows:
             ref_id = r['id']
-            cursor.execute("\n                SELECT COALESCE(SUM(ABS(amount)), 0) as total\n                FROM transactions\n                WHERE user_id = ? AND type IN ('subscription', 'trial')\n                ", (ref_id,))
+            cursor.execute("\n                SELECT COALESCE(SUM(ABS(amount)), 0) as total\n                FROM transactions\n                WHERE user_id = ? AND type IN ('subscription', 'subscription_extend', 'trial')\n                ", (ref_id,))
             spent_row = cursor.fetchone()
             total_spent = float(spent_row['total'] or 0)
             cursor.execute("\n                SELECT COALESCE(SUM(amount), 0) as total\n                FROM transactions\n                WHERE user_id = ? AND type = 'referral_income' \n                AND description LIKE ?\n                ", (user['id'], f"%реферала%{r['username'] or ref_id}%"))
@@ -2512,7 +2680,7 @@ def get_user_referrals(_user=None):
             my_profit = float(income_row['total'] or 0)
             if my_profit == 0 and total_spent > 0:
                 my_profit = total_spent * rate
-            cursor.execute("\n                SELECT type, amount, created_at, description\n                FROM transactions\n                WHERE user_id = ? AND type IN ('subscription', 'trial')\n                ORDER BY created_at DESC\n                LIMIT 5\n                ", (ref_id,))
+            cursor.execute("\n                SELECT type, amount, created_at, description\n                FROM transactions\n                WHERE user_id = ? AND type IN ('subscription', 'subscription_extend', 'trial')\n                ORDER BY created_at DESC\n                LIMIT 5\n                ", (ref_id,))
             history_rows = cursor.fetchall()
             history = []
             for h in history_rows:
@@ -2572,8 +2740,8 @@ def request_withdrawal(_user=None):
     phone = (data.get('phone') or '').strip()
     bank = (data.get('bank') or '').strip()
     logger.info(f'Withdrawal request: user_id={user["id"]}, amount={amount}, method={method}')
-    if method not in ('card', 'balance'):
-        return (jsonify({'error': 'Доступен только вывод на карту (телефон+банк) или перевод на баланс'}), 400)
+    if method not in ('card',):
+        return (jsonify({'error': 'Доступен только вывод на карту (телефон+банк)'}), 400)
     try:
         amount = float(amount)
     except (ValueError, TypeError):
@@ -2591,30 +2759,6 @@ def request_withdrawal(_user=None):
         return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
 
     is_admin = bool(telegram_id and int(telegram_id) in _parse_admin_ids())
-
-    if method == 'balance':
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                'UPDATE users SET balance = balance + ?, partner_balance = partner_balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND partner_balance >= ?',
-                (amount, amount, user['id'], amount),
-            )
-            if cursor.rowcount <= 0:
-                conn.rollback()
-                return (jsonify({'error': 'Недостаточно средств на реферальном балансе'}), 400)
-            cursor.execute(
-                "INSERT INTO transactions (user_id, type, amount, status, description) VALUES (?, 'transfer', ?, 'Success', 'Перевод с реферального баланса на основной')",
-                (user['id'], amount),
-            )
-            conn.commit()
-            return jsonify({'success': True, 'message': f'Переведено {amount}₽ на основной баланс'})
-        except Exception as e:
-            conn.rollback()
-            logger.error(f'Balance transfer error: {e}')
-            return (jsonify({'error': str(e)}), 500)
-        finally:
-            conn.close()
 
     # method == 'card' — ручная заявка админу
     if amount < 200:
@@ -2696,14 +2840,14 @@ def get_stats_summary():
         active_keys = cursor.fetchone()['cnt'] or 0
         now = datetime.utcnow()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        cursor.execute("\n            SELECT COALESCE(SUM(amount), 0) AS total\n            FROM transactions\n            WHERE type = 'deposit'\n              AND created_at >= ?\n              AND status = 'Success'\n            ", (month_start.isoformat(),))
+        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend')\n              AND created_at >= ?\n              AND status = 'Success'\n            ", (month_start.isoformat(),))
         monthly_revenue = float(cursor.fetchone()['total'] or 0)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         cursor.execute(
             """
-            SELECT COALESCE(SUM(amount), 0) AS total
+            SELECT COALESCE(SUM(ABS(amount)), 0) AS total
             FROM transactions
-            WHERE type = 'deposit'
+            WHERE type IN ('subscription', 'subscription_extend')
               AND created_at >= ?
               AND status = 'Success'
             """,
@@ -2746,7 +2890,7 @@ def get_finance_stats():
     cursor = conn.cursor()
     from datetime import datetime, timedelta
     try:
-        cursor.execute("\n            SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type = 'deposit' AND status = 'Success'\n        ")
+        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n        ")
         deposits_row = cursor.fetchone()
         deposits_total = float(deposits_row['total'] or 0)
         deposits_count = deposits_row['cnt'] or 0
@@ -2759,7 +2903,7 @@ def get_finance_stats():
         now = datetime.utcnow()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
-        cursor.execute("\n            SELECT COALESCE(SUM(amount), 0) AS total\n            FROM transactions\n            WHERE type = 'deposit' AND status = 'Success'\n              AND created_at >= ? AND created_at < ?\n        ", (prev_month_start.isoformat(), month_start.isoformat()))
+        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n              AND created_at >= ? AND created_at < ?\n        ", (prev_month_start.isoformat(), month_start.isoformat()))
         prev_deposits = float(cursor.fetchone()['total'] or 0)
         cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('referral_withdrawal', 'refund', 'withdrawal', 'admin_withdrawal')\n              AND status = 'Success'\n              AND created_at >= ? AND created_at < ?\n        ", (prev_month_start.isoformat(), month_start.isoformat()))
         prev_withdrawals = float(cursor.fetchone()['total'] or 0)
@@ -2785,7 +2929,7 @@ def get_full_statistics():
         cursor.execute("SELECT COUNT(*) AS cnt FROM vpn_keys WHERE status = 'Active'")
         active_subscriptions = cursor.fetchone()['cnt'] or 0
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        cursor.execute("\n            SELECT COUNT(*) AS cnt FROM transactions\n            WHERE type = 'deposit' AND status = 'Success' AND created_at >= ?\n        ", (today_start.isoformat(),))
+        cursor.execute("\n            SELECT COUNT(*) AS cnt FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success' AND created_at >= ?\n        ", (today_start.isoformat(),))
         payments_today = cursor.fetchone()['cnt'] or 0
         cursor.execute('SELECT COALESCE(SUM(balance), 0) AS total FROM users')
         clients_balance = float(cursor.fetchone()['total'] or 0)
@@ -2796,7 +2940,7 @@ def get_full_statistics():
             day = (datetime.utcnow() - timedelta(days=period_days - 1 - i)).date()
             day_start = datetime.combine(day, datetime.min.time())
             day_end = day_start + timedelta(days=1)
-            cursor.execute("\n                SELECT COALESCE(SUM(amount), 0) AS total\n                FROM transactions\n                WHERE type = 'deposit' AND status = 'Success'\n                  AND created_at >= ? AND created_at < ?\n            ", (day_start.isoformat(), day_end.isoformat()))
+            cursor.execute("\n                SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n                FROM transactions\n                WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n                  AND created_at >= ? AND created_at < ?\n            ", (day_start.isoformat(), day_end.isoformat()))
             revenue_data.append(float(cursor.fetchone()['total'] or 0))
             revenue_labels.append(day.strftime(label_fmt))
         cursor.execute("\n            SELECT COUNT(DISTINCT user_id) AS cnt FROM vpn_keys \n            WHERE status = 'Active' AND expiry_date > datetime('now')\n        ")
@@ -2809,7 +2953,7 @@ def get_full_statistics():
         expired_users = cursor.fetchone()['cnt'] or 0
         sleeping_users = max(0, total_users - active_users - trial_users - banned_users - expired_users)
         user_dist_data = [{'label': 'Активные', 'value': active_users}, {'label': 'Ушли', 'value': expired_users}, {'label': 'Trial', 'value': trial_users}, {'label': 'Бан', 'value': banned_users}, {'label': 'Спящие', 'value': sleeping_users}]
-        cursor.execute("\n            SELECT payment_method, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type = 'deposit' AND status = 'Success'\n            GROUP BY payment_method\n        ")
+        cursor.execute("\n            SELECT payment_method, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n            GROUP BY payment_method\n        ")
         payment_methods_raw = cursor.fetchall()
         total_payments = sum((row['cnt'] for row in payment_methods_raw)) or 1
         payment_methods_data = []
@@ -2848,12 +2992,12 @@ def get_full_statistics():
         partners = cursor.fetchone()['cnt'] or 0
         cursor.execute('SELECT COALESCE(SUM(total_earned), 0) AS total FROM users')
         total_paid = float(cursor.fetchone()['total'] or 0)
-        cursor.execute("\n            SELECT u.id, u.username, u.partner_rate,\n                   COALESCE(refs.referrals_count, 0) AS referrals_count,\n                   COALESCE(spent.total_spent, 0) AS total_spent\n            FROM users u\n            LEFT JOIN (\n                SELECT referred_by AS referrer_id, COUNT(*) AS referrals_count\n                FROM users\n                WHERE referred_by IS NOT NULL\n                GROUP BY referred_by\n            ) refs ON refs.referrer_id = u.id\n            LEFT JOIN (\n                SELECT r.referred_by AS referrer_id, COALESCE(SUM(t.amount), 0) AS total_spent\n                FROM users r\n                JOIN transactions t ON t.user_id = r.id\n                WHERE r.referred_by IS NOT NULL\n                  AND t.type = 'deposit'\n                  AND t.status = 'Success'\n                GROUP BY r.referred_by\n            ) spent ON spent.referrer_id = u.id\n            WHERE COALESCE(refs.referrals_count, 0) > 0\n            ORDER BY referrals_count DESC, total_spent DESC\n            LIMIT 10\n        ")
+        cursor.execute("\n            SELECT u.id, u.username, u.partner_rate,\n                   COALESCE(refs.referrals_count, 0) AS referrals_count,\n                   COALESCE(spent.total_spent, 0) AS total_spent\n            FROM users u\n            LEFT JOIN (\n                SELECT referred_by AS referrer_id, COUNT(*) AS referrals_count\n                FROM users\n                WHERE referred_by IS NOT NULL\n                GROUP BY referred_by\n            ) refs ON refs.referrer_id = u.id\n            LEFT JOIN (\n                SELECT r.referred_by AS referrer_id, COALESCE(SUM(t.amount), 0) AS total_spent\n                FROM users r\n                JOIN transactions t ON t.user_id = r.id\n                WHERE r.referred_by IS NOT NULL\n                  AND t.type IN ('subscription', 'subscription_extend', 'trial')\n                  AND t.status = 'Success'\n                GROUP BY r.referred_by\n            ) spent ON spent.referrer_id = u.id\n            WHERE COALESCE(refs.referrals_count, 0) > 0\n            ORDER BY referrals_count DESC, total_spent DESC\n            LIMIT 10\n        ")
         top_referrers_raw = cursor.fetchall()
         top_referrers = []
         for idx, row in enumerate(top_referrers_raw, 1):
             username = row['username'] or f"id{row['id']}"
-            rate = row['partner_rate'] or 20
+            rate = row['partner_rate'] or 30
             total_spent = float(row['total_spent'] or 0)
             earned = total_spent * (rate / 100)
             top_referrers.append({'id': idx, 'name': f'@{username}' if not username.startswith('@') else username, 'count': row['referrals_count'] or 0, 'earned': earned})
@@ -2958,6 +3102,31 @@ def update_tariff(plan_id: int):
         return jsonify({'success': True, 'plan': dict(row)})
     finally:
         conn.close()
+
+
+@app.route('/api/panel/system-settings', methods=['GET'])
+@require_auth
+def get_system_settings():
+    """Получить системные настройки (тариф после триала, устройства)."""
+    settings = {
+        'trial_tariff_id': database.get_system_setting('trial_tariff_id') or '',
+        'trial_devices_limit': int(database.get_system_setting('trial_devices_limit') or 1),
+        'paid_devices_limit': int(database.get_system_setting('paid_devices_limit') or 2),
+    }
+    return jsonify(settings)
+
+
+@app.route('/api/panel/system-settings', methods=['PUT'])
+@require_auth
+def update_system_settings():
+    """Обновить системные настройки."""
+    data = request.json or {}
+    allowed = ('trial_tariff_id', 'trial_devices_limit', 'paid_devices_limit')
+    for key in allowed:
+        if key in data:
+            database.set_system_setting(key, str(data[key]))
+    return jsonify({'success': True})
+
 
 @app.route('/api/panel/tariffs/<int:plan_id>', methods=['DELETE'])
 
@@ -3123,49 +3292,51 @@ def get_public_page(page_type: str):
 @require_auth
 
 def get_settings():
-    env_settings = {
-        'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN', ''),
-        'TELEGRAM_ADMIN_IDS': os.getenv('TELEGRAM_ADMIN_IDS', os.getenv('TELEGRAM_ADMIN_ID', '')),
-        'REMWAVE_PANEL_URL': os.getenv('REMWAVE_PANEL_URL', os.getenv('REMWAVE_API_URL', '')),
-        'REMWAVE_API_KEY': os.getenv('REMWAVE_API_KEY', ''),
-        'CLOUDPAYMENTS_PUBLIC_ID': os.getenv('CLOUDPAYMENTS_PUBLIC_ID', ''),
-        'CLOUDPAYMENTS_API_SECRET': os.getenv('CLOUDPAYMENTS_API_SECRET', ''),
-        'CLOUDPAYMENTS_API_URL': os.getenv('CLOUDPAYMENTS_API_URL', 'https://api.cloudpayments.ru'),
-        'TRIAL_HOURS': os.getenv('TRIAL_HOURS', '24'),
-        'PANEL_PASSWORD_SET': '1',
-    }
-    return jsonify(env_settings)
+    """Возвращает только оперативные настройки (не .env)."""
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM backup_settings ORDER BY id DESC LIMIT 1')
+        brow = cursor.fetchone()
+        backup = dict(brow) if brow else {'enabled': False, 'interval_minutes': 360, 'last_backup': None}
+        # backward compat: convert hours -> minutes if old data
+        if 'interval_hours' in backup and 'interval_minutes' not in backup:
+            backup['interval_minutes'] = int(backup.get('interval_hours', 6)) * 60
+    finally:
+        conn.close()
+    return jsonify({'backup': backup})
 
 @app.route('/api/panel/settings', methods=['PUT'])
 
 @require_auth
 
 def update_settings():
-    data = request.json
-    if not isinstance(data, dict):
-        return (jsonify({'error': 'Invalid payload'}), 400)
-    try:
-        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
-        updates: dict[str, str] = {}
-        for key, value in data.items():
-            if key in ENV_KEYS_MANAGED:
-                normalized = str(value)
-                if key == 'TELEGRAM_ADMIN_IDS':
-                    parts = [p.strip() for p in normalized.replace(';', ',').split(',') if p.strip()]
-                    normalized = ','.join(parts)
-                updates[key] = normalized
-                os.environ[key] = normalized
-        if 'TELEGRAM_ADMIN_IDS' in updates:
-            os.environ['TELEGRAM_ADMIN_ID'] = updates['TELEGRAM_ADMIN_IDS'].split(',')[0].strip() if updates['TELEGRAM_ADMIN_IDS'].strip() else ''
-            updates['TELEGRAM_ADMIN_ID'] = os.environ['TELEGRAM_ADMIN_ID']
-        if updates:
-            _save_env_map(env_path, updates)
-        if any(k.startswith('CLOUDPAYMENTS_') for k in updates):
-            cloudpayments.cloudpayments_api.reload_from_env()
-        return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f'Error updating settings: {e}')
-        return (jsonify({'error': str(e)}), 500)
+    """Обновить оперативные настройки."""
+    data = request.json or {}
+    # Backup settings sub-object
+    backup_data = data.get('backup')
+    if backup_data:
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        try:
+            interval_min = max(10, int(backup_data.get('interval_minutes', 360)))
+            enabled = 1 if backup_data.get('enabled') else 0
+            cursor.execute('SELECT id FROM backup_settings ORDER BY id DESC LIMIT 1')
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(
+                    'UPDATE backup_settings SET enabled = ?, interval_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                    (enabled, interval_min, row['id']),
+                )
+            else:
+                cursor.execute(
+                    'INSERT INTO backup_settings (enabled, interval_minutes) VALUES (?, ?)',
+                    (enabled, interval_min),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return jsonify({'success': True})
 
 @app.route('/api/panel/default-squads', methods=['GET'])
 
@@ -3292,8 +3463,12 @@ def get_backup_status():
         cursor.execute('SELECT * FROM backup_settings ORDER BY id DESC LIMIT 1')
         row = cursor.fetchone()
         if row:
-            return jsonify({'enabled': bool(row['enabled']), 'interval_hours': row['interval_hours'], 'last_backup': row['last_backup']})
-        return jsonify({'enabled': False, 'interval_hours': 12, 'last_backup': None})
+            d = dict(row)
+            # backward compat
+            if 'interval_minutes' not in d or d['interval_minutes'] is None:
+                d['interval_minutes'] = int(d.get('interval_hours', 6)) * 60
+            return jsonify({'enabled': bool(d['enabled']), 'interval_minutes': d['interval_minutes'], 'last_backup': d['last_backup']})
+        return jsonify({'enabled': False, 'interval_minutes': 360, 'last_backup': None})
     finally:
         conn.close()
 
@@ -3302,16 +3477,24 @@ def get_backup_status():
 @require_auth
 
 def update_backup_settings():
-    data = request.json
+    data = request.json or {}
+    interval_min = max(10, int(data.get('interval_minutes', 360)))
+    enabled = 1 if data.get('enabled') else 0
     conn = database.get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT id FROM backup_settings ORDER BY id DESC LIMIT 1')
         row = cursor.fetchone()
         if row:
-            cursor.execute('\n                UPDATE backup_settings SET enabled = ?, interval_hours = ?, updated_at = CURRENT_TIMESTAMP\n                WHERE id = ?\n            ', (1 if data.get('enabled') else 0, data.get('interval_hours', 12), row['id']))
+            cursor.execute(
+                'UPDATE backup_settings SET enabled = ?, interval_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (enabled, interval_min, row['id']),
+            )
         else:
-            cursor.execute('\n                INSERT INTO backup_settings (enabled, interval_hours)\n                VALUES (?, ?)\n            ', (1 if data.get('enabled') else 0, data.get('interval_hours', 12)))
+            cursor.execute(
+                'INSERT INTO backup_settings (enabled, interval_minutes) VALUES (?, ?)',
+                (enabled, interval_min),
+            )
         conn.commit()
         return jsonify({'success': True})
     finally:
@@ -4001,18 +4184,67 @@ def cleanup_expired_keys():
     finally:
         conn.close()
 
+_backup_scheduler_instance = None
+
+
+def _reschedule_backup(scheduler):
+    """Перепланировать задание бэкапа по актуальному интервалу из БД."""
+    try:
+        from apscheduler.triggers.interval import IntervalTrigger
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT enabled, interval_minutes FROM backup_settings ORDER BY id DESC LIMIT 1')
+        row = cursor.fetchone()
+        conn.close()
+        if not row or not row['enabled']:
+            if scheduler.get_job('auto_backup'):
+                scheduler.remove_job('auto_backup')
+            return
+        interval_min = max(10, int(row['interval_minutes'] or 360))
+        trigger = IntervalTrigger(minutes=interval_min, start_date=_next_round_minute(interval_min))
+        if scheduler.get_job('auto_backup'):
+            scheduler.reschedule_job('auto_backup', trigger=trigger)
+        else:
+            scheduler.add_job(auto_backup, trigger, id='auto_backup', name=f'Auto backup every {interval_min}min', replace_existing=True)
+        logger.info(f'Backup rescheduled: every {interval_min} min')
+    except Exception as e:
+        logger.error(f'_reschedule_backup error: {e}')
+
+
+def _next_round_minute(interval_min: int):
+    """Вычислить ближайший момент hh:00 кратный интервалу."""
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    # Округляем к следующему кратному интервалу от начала текущего часа
+    current_slot = (now.minute // interval_min) * interval_min
+    next_slot = current_slot + interval_min
+    if next_slot >= 60:
+        next_dt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        next_dt = now.replace(minute=next_slot, second=0, microsecond=0)
+    return next_dt
+
+
 def start_backup_scheduler():
+    global _backup_scheduler_instance
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
-        from apscheduler.triggers.cron import CronTrigger
-        import pytz
         scheduler = BackgroundScheduler()
-        moscow_tz = pytz.timezone('Europe/Moscow')
-        scheduler.add_job(auto_backup, CronTrigger(hour=2, minute=0, timezone=moscow_tz), id='auto_backup', name='Daily backup at 02:00 MSK', replace_existing=True)
+        # Также задание каждую минуту для перепроверки настроек (с кэшированием)
+        scheduler.add_job(
+            lambda: _reschedule_backup(scheduler),
+            'interval', minutes=5,
+            id='backup_config_check',
+            name='Backup config re-check',
+            replace_existing=True,
+        )
         scheduler.start()
-        logger.info('Backup scheduler started - daily at 02:00 MSK')
+        _backup_scheduler_instance = scheduler
+        # Сразу применить текущие настройки
+        _reschedule_backup(scheduler)
+        logger.info('Backup scheduler started')
     except ImportError:
-        logger.warning('APScheduler not installed, auto backups disabled. Install with: pip install apscheduler pytz')
+        logger.warning('APScheduler not installed — auto backups disabled. pip install apscheduler')
     except Exception as e:
         logger.error(f'Failed to start backup scheduler: {e}')
 if __name__ == '__main__':

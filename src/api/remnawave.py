@@ -266,6 +266,11 @@ class RemnaWaveAPI:
         response = await self._make_request('GET', '/api/users', params=params)
         users = [self._parse_user(user) for user in response['response']['users']]
         return {'users': users, 'total': response['response']['total']}
+    async def get_user_raw(self, uuid: str) -> Dict:
+        """Вернуть сырой JSON пользователя — все поля как есть из Remnawave."""
+        response = await self._make_request('GET', f'/api/users/{uuid}')
+        return response.get('response', response) if isinstance(response, dict) else {}
+
     def _parse_user(self, user_data: Dict) -> RemnaWaveUser:
         status_str = user_data.get('status') or 'ACTIVE'
         try:

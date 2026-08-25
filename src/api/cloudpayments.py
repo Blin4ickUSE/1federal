@@ -344,70 +344,36 @@ def parse_request_payload(request: Request) -> Tuple[dict, bytes]:
     return data, raw_body
 
 
-def _apply_deposit(user_id: int, amount: float, method_name: str, payment_id: str):
-    bonus_amount = 0
-    bonus_name = None
+def _record_subscription_payment(
+    user_id: int,
+    amount: float,
+    method_name: str,
+    payment_id: str,
+    is_trial: bool = False,
+    days: int = 0,
+) -> Optional[int]:
+    """Записать прямой платёж за подписку (без зачисления на баланс)."""
+    trans_type = 'subscription'
+    desc = f'Пробный период {days} дн. ({method_name})' if is_trial else f'Подписка {days} дн. ({method_name})'
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT * FROM auto_discounts
-            WHERE is_active = 1 AND condition_type = 'payment_amount'
-            ORDER BY CAST(condition_value AS REAL) DESC
-            """
-        )
-        discounts = cursor.fetchall()
-        for discount in discounts:
-            try:
-                min_amount = float(discount['condition_value'])
-                if amount >= min_amount:
-                    if discount['discount_type'] == 'percent':
-                        bonus_amount = round(amount * float(discount['discount_value']) / 100, 2)
-                    else:
-                        bonus_amount = float(discount['discount_value'])
-                    bonus_name = discount['name']
-                    break
-            except (ValueError, TypeError):
-                continue
-        conn.close()
-    except Exception as exc:
-        logger.error('Error checking auto-discounts: %s', exc)
-
-    total_amount = amount + bonus_amount
-    database.update_user_balance(user_id, total_amount)
-    tx_id = database.insert_deposit_transaction(user_id, total_amount, method_name, payment_id, 'CloudPayments')
-    # Developer share from real paid amount (без бонусов на баланс)
-    try:
-        database.accrue_developer_share(
-            float(amount),
-            source_transaction_id=tx_id,
-            note=f'Доля с платежа {amount:.2f}₽ ({method_name})',
-        )
-    except Exception as exc:
-        logger.error('Developer share accrual failed: %s', exc)
-    if bonus_amount > 0:
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO transactions (user_id, type, amount, status, description)
-            VALUES (?, 'bonus', ?, 'Success', ?)
+            INSERT INTO transactions (user_id, type, amount, status, description,
+                                      payment_method, payment_provider, payment_id, duration_days)
+            VALUES (?, ?, ?, 'Success', ?, ?, 'CloudPayments', ?, ?)
             """,
-            (user_id, bonus_amount, f'Бонус: {bonus_name}'),
+            (user_id, trans_type, float(amount), desc, method_name, str(payment_id), int(days)),
         )
+        tx_id = cursor.lastrowid
         conn.commit()
+        return int(tx_id) if tx_id else None
+    except Exception as exc:
+        logger.error('_record_subscription_payment error: %s', exc)
+        return None
+    finally:
         conn.close()
-
-    user = database.get_user_by_id(user_id)
-    if user:
-        if bonus_amount > 0:
-            msg = f'✅ Баланс пополнен на {amount}₽ + бонус {bonus_amount}₽ ({method_name})'
-        else:
-            msg = f'✅ Баланс пополнен на {amount}₽ ({method_name})'
-        if user.get('telegram_id'):
-            core.send_notification_to_user(user['telegram_id'], msg)
-        notify_admin_about_deposit(user, amount, method_name, 'CloudPayments')
 
 
 def handle_pay(data: dict) -> None:
@@ -470,8 +436,6 @@ def handle_pay(data: dict) -> None:
     if method_name.lower() in ('', 'card', 'cards'):
         method_name = 'Карта'
 
-    _apply_deposit(user_id, amount, method_name, transaction_id or invoice_id)
-
     saved_method_id = None
     if token:
         saved_method_id = recurring.save_card_token(user_id, token, card_last4, card_brand)
@@ -479,11 +443,114 @@ def handle_pay(data: dict) -> None:
     if intent and intent.get('status') != 'paid':
         database.mark_payment_intent_paid(invoice_id, transaction_id)
         is_trial = bool(int(intent.get('is_trial') or 0))
+        intent_days = int(intent.get('days') or 30)
+
+        # Записываем прямой платёж за подписку (без зачисления на баланс)
+        tx_id = _record_subscription_payment(
+            user_id=user_id,
+            amount=amount,
+            method_name=method_name,
+            payment_id=transaction_id or invoice_id,
+            is_trial=is_trial,
+            days=intent_days,
+        )
+        # Начисляем долю разработчика
+        try:
+            database.accrue_developer_share(
+                float(amount),
+                source_transaction_id=tx_id,
+                note=f"Доля с {'триала' if is_trial else 'подписки'} {amount:.2f}₽ ({method_name})",
+            )
+        except Exception as exc:
+            logger.error('Developer share accrual failed: %s', exc)
+
+        # BUG FIX: создаём VPN-ключ сразу при оплате через webhook
+        user = database.get_user_by_id(user_id)
+        _sub_result = None
+        if is_trial:
+            # Триал: 1 устройство, 10 ГБ
+            TRIAL_TRAFFIC_BYTES = int(10 * 1024 ** 3)
+            TRIAL_DEVICES = 1
+            _sub_result = core.create_user_and_subscription(
+                telegram_id=user.get('telegram_id') if user else None,
+                username=user.get('username', '') if user else '',
+                days=intent_days,
+                traffic_limit=TRIAL_TRAFFIC_BYTES,
+                plan_type=str(intent.get('plan_type') or 'vpn_regular'),
+                devices_limit=TRIAL_DEVICES,
+                force_new=False,
+                email=user.get('email') if user else None,
+                existing_user_id=user_id,
+            )
+            if _sub_result:
+                try:
+                    conn_t = database.get_db_connection()
+                    conn_t.execute('UPDATE users SET trial_used = 1, status = ? WHERE id = ?', ('Trial', user_id))
+                    conn_t.commit()
+                    conn_t.close()
+                except Exception as _e:
+                    logger.error('handle_pay: failed to set trial_used for user %s: %s', user_id, _e)
+            else:
+                logger.error('handle_pay: failed to create trial VPN key for user %s', user_id)
+        else:
+            # Обычная подписка: 2 устройства, трафик без реального лимита (10 ТБ)
+            PAID_TRAFFIC_BYTES = int(10 * 1024 ** 4)  # 10 TB
+            PAID_DEVICES = int(intent.get('devices_limit') or 2)
+            _sub_result = core.create_user_and_subscription(
+                telegram_id=user.get('telegram_id') if user else None,
+                username=user.get('username', '') if user else '',
+                days=intent_days,
+                traffic_limit=PAID_TRAFFIC_BYTES,
+                plan_type=str(intent.get('plan_type') or 'vpn_regular'),
+                devices_limit=PAID_DEVICES,
+                force_new=False,
+                email=user.get('email') if user else None,
+                existing_user_id=user_id,
+            )
+            if _sub_result:
+                try:
+                    conn_u = database.get_db_connection()
+                    conn_u.execute("UPDATE users SET status = 'Active' WHERE id = ?", (user_id,))
+                    conn_u.commit()
+                    conn_u.close()
+                except Exception as _e:
+                    logger.error('handle_pay: failed to set user status for user %s: %s', user_id, _e)
+            else:
+                logger.error('handle_pay: failed to create paid VPN key for user %s', user_id)
+
+        # Уведомляем пользователя
+        if user and user.get('telegram_id'):
+            label = 'Пробный период' if is_trial else 'Подписка'
+            if _sub_result:
+                core.send_notification_to_user(
+                    user['telegram_id'],
+                    f'✅ Оплата прошла успешно!\n{label} на {intent_days} дн. активирована.\n💳 Списано: {amount:.0f}₽',
+                )
+            else:
+                core.send_notification_to_user(
+                    user['telegram_id'],
+                    f'⚠️ Оплата прошла, но возникла ошибка при активации подписки. Обратитесь в поддержку.',
+                )
+        notify_admin_about_deposit(user, amount, method_name, 'CloudPayments')
+
+        # Сохраняем vpn_key_id в intent для рекуррентных платежей
+        if _sub_result and _sub_result.get('key_id') and not intent.get('vpn_key_id'):
+            try:
+                conn_ki = database.get_db_connection()
+                conn_ki.execute(
+                    'UPDATE payment_intents SET vpn_key_id = ? WHERE invoice_id = ?',
+                    (_sub_result['key_id'], invoice_id),
+                )
+                conn_ki.commit()
+                conn_ki.close()
+            except Exception as _e:
+                logger.error('handle_pay: failed to update vpn_key_id in intent: %s', _e)
+
         if token or saved_method_id:
             recurring.create_recurring_after_first_payment(
                 user_id=user_id,
                 amount=float(intent.get('amount') or amount),
-                duration_days=int(intent.get('days') or 30),
+                duration_days=intent_days,
                 plan_type=str(intent.get('plan_type') or 'vpn_regular'),
                 tariff_category=str(intent.get('tariff_category') or 'regular'),
                 devices_limit=int(intent.get('devices_limit') or 2),
@@ -499,6 +566,12 @@ def handle_pay(data: dict) -> None:
                 '(включите «Сохранение токена карты» в ЛК CloudPayments)',
                 invoice_id,
             )
+    else:
+        # Нет intent — неизвестный платёж, просто логируем
+        logger.warning(
+            'CP Pay: payment without intent invoice=%s user=%s amount=%s — skipped (no balance system)',
+            invoice_id, user_id, amount,
+        )
 
     if subscription_id_cp:
         logger.info('CP Pay SubscriptionId=%s (ignored for custom retries)', subscription_id_cp)

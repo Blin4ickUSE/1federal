@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Home, DollarSign, Users, Key, Mail, Gift, Settings, Menu, X,
   CheckCircle, AlertCircle, Search, Filter, ArrowUpRight, ArrowDownLeft,
-  Activity, Loader, Ban, UserPlus, UserMinus, Clock, Edit2, Copy,
+  Activity, Loader, Ban, UserPlus, UserMinus, Clock, Edit2, Edit, Check, Copy,
   Smartphone, Database, Bell, Wallet, Plus, Lock, Send, Layers,
   Trash2, ChevronDown, Save, AlertTriangle, RefreshCw, BarChart2,
   Trophy, CreditCard, Link, Unlink, Shield, Wifi, Globe, Monitor,
@@ -24,6 +24,33 @@ function getPanelSecret(): string {
 function setPanelSecret(s: string) { localStorage.setItem('panel_secret', s); }
 function clearPanelSecret() { localStorage.removeItem('panel_secret'); }
 
+const HTTP_STATUS_RU: Record<number, string> = {
+  400: 'Некорректный запрос',
+  401: 'Не авторизован',
+  403: 'Доступ запрещён',
+  404: 'Не найдено',
+  409: 'Конфликт данных',
+  422: 'Ошибка валидации',
+  429: 'Слишком много запросов',
+  500: 'Внутренняя ошибка сервера',
+  502: 'Ошибка шлюза',
+  503: 'Сервис недоступен',
+  504: 'Таймаут шлюза',
+};
+
+function parseApiError(status: number, text: string): string {
+  if (text) {
+    try {
+      const j = JSON.parse(text);
+      const msg = j.error || j.message || j.detail || j.msg;
+      if (msg && typeof msg === 'string') return msg;
+    } catch {}
+    // Если текст короткий и читабельный — показываем его
+    if (text.length < 200 && !text.startsWith('{') && !text.startsWith('<')) return text;
+  }
+  return HTTP_STATUS_RU[status] || `Ошибка ${status}`;
+}
+
 async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   const url = `/api${path.startsWith('/') ? path : '/' + path}`;
   const headers: any = { 'Content-Type': 'application/json', ...(options.headers || {}) };
@@ -35,7 +62,7 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   if (!res.ok) {
     if (res.status === 401) { clearPanelSecret(); window.location.reload(); }
     const t = await res.text();
-    throw new Error(t || `HTTP ${res.status}`);
+    throw new Error(parseApiError(res.status, t));
   }
   try { return await res.json(); } catch { return null; }
 }
@@ -421,25 +448,29 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
     <div className="flex flex-col gap-6 rise">
       <div><div className="h-page">Финансы</div><div className="sub mt-1">Доходы, операции и возвраты CloudPayments</div></div>
       <div className="grid grid-cols-2 gap-4">
-        <Stat title="Пополнения" value={stats ? fmtM(stats.deposits) : '—'} icon={ArrowUpRight} />
-        <Stat title="Успешные операции" value={stats ? fmtN(stats.successfulOps) : '—'} icon={Activity} sub="операций" />
+        <Stat title="Доход" value={stats ? fmtM(stats.deposits) : '—'} icon={ArrowUpRight} />
+        <Stat title="Успешные платежи" value={stats ? fmtN(stats.successfulOps) : '—'} icon={Activity} sub="платежей" />
       </div>
       <div className="tbl-wrap">
         <div style={{ overflowX: 'auto' }}>
           <table className="tbl">
-            <thead><tr><th>ID</th><th>Пользователь</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead>
+            <thead><tr><th>ID</th><th>Пользователь</th><th>Тип</th><th>Сумма</th><th>Способ</th><th>Дата</th></tr></thead>
             <tbody>
               {transactions.length === 0
-                ? <tr className="empty-row"><td colSpan={5}>Пока нет операций</td></tr>
-                : transactions.map(tx => (
+                ? <tr className="empty-row"><td colSpan={6}>Пока нет операций</td></tr>
+                : transactions.map(tx => {
+                  const typeLabel = tx.type === 'trial' ? 'Пробная' : tx.type === 'subscription' ? 'Покупка' : tx.type === 'subscription_extend' ? 'Продление' : tx.type || '—';
+                  return (
                   <tr key={tx.id} className="click" onClick={() => onSelect(tx)}>
                     <td className="muted mono">#{tx.id}</td>
                     <td className="muted">{tx.user}</td>
-                    <td style={{ fontWeight: 600, color: tx.amount > 0 ? 'var(--text)' : 'var(--muted)' }}>{tx.amount > 0 ? '+' : ''}{tx.amount} ₽</td>
-                    <td className="muted">{tx.status}</td>
+                    <td><span className={`badge ${tx.type === 'trial' ? 'line' : tx.type === 'subscription_extend' ? 'mute' : 'solid'}`}>{typeLabel}</span></td>
+                    <td style={{ fontWeight: 600 }}>{Math.abs(tx.amount).toLocaleString('ru-RU')} ₽</td>
+                    <td className="faint" style={{ fontSize: 12 }}>{tx.method}</td>
                     <td className="faint">{tx.date}</td>
                   </tr>
-                ))}
+                  );
+                })}
             </tbody>
           </table>
         </div>
@@ -451,7 +482,7 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
 // ─── TRANSACTION MODAL ───────────────────────────────────────────
 const TransactionModal: React.FC<{ tx: any; onClose: () => void; onRefunded?: () => void; onToast?: (t: string, m?: string, ty?: ToastType) => void }> = ({ tx, onClose, onRefunded, onToast }) => {
   const [busy, setBusy] = useState(false);
-  const canRefund = tx.amount > 0 && String(tx.status).toLowerCase() === 'success' && (tx.type === 'deposit' || !tx.type);
+  const canRefund = tx.amount > 0 && String(tx.status).toLowerCase() === 'success' && ['subscription', 'subscription_extend'].includes(tx.type);
 
   const doRefund = async () => {
     if (!canRefund || !confirm(`Вернуть ${tx.amount}₽ через CloudPayments?`)) return;
@@ -613,13 +644,14 @@ const UserDetailPage: React.FC<{
   const [editRate, setEditRate] = useState('');
   const [editBalance, setEditBalance] = useState('');
   const [editReferrer, setEditReferrer] = useState('');
-  const [editEmail, setEditEmail] = useState('');
-  const [editTelegram, setEditTelegram] = useState('');
+  const [editEmail, setEditEmail] = useState<string | null>(null);
+  const [editTelegram, setEditTelegram] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
 
   // Modals
   const [banModal, setBanModal] = useState(false);
   const [banReason, setBanReason] = useState('');
+  const [deleteModal, setDeleteModal] = useState(false);
   const [extendModal, setExtendModal] = useState<{ rw_uuid: string; current_expire: string | null } | null>(null);
   const [extendDays, setExtendDays] = useState('');
   const [reduceModal, setReduceModal] = useState<{ rw_uuid: string } | null>(null);
@@ -639,10 +671,9 @@ const UserDetailPage: React.FC<{
     try {
       const d = await apiFetch(`/panel/users/by-id/${userId}`);
       setUser(d);
-      setEditRate(String(d.partner_rate ?? 20));
+      setEditRate(String(d.partner_rate ?? 30));
       setEditBalance(String(d.partner_balance ?? 0));
-      setEditEmail(d.email || '');
-      setEditTelegram(d.telegram_id != null ? String(d.telegram_id) : '');
+      // editEmail/editTelegram now open on demand (pencil icon)
     } catch (e: any) {
       onToast('Ошибка', e.message, 'error');
     }
@@ -779,15 +810,14 @@ const UserDetailPage: React.FC<{
           <div className="card" style={{ padding: 20 }}>
             <h3 className="h-sec mb-4">Идентификация</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Static fields */}
               {[
                 ['ID', String(user.id)],
-                ['Telegram ID', user.telegram_id != null ? String(user.telegram_id) : '—'],
-                ['Email', user.email || '—'],
                 ['Username', user.username ? `@${user.username}` : '—'],
                 ['Отображаемое имя', user.full_name || '—'],
                 ['Реферальный код', user.referral_code || '—'],
                 ['Регистрация', fmtDate(user.registration_date)],
-                ['Статус', user.status],
+                ['Статус', user.status === 'None' || !user.status ? 'Нет подписки' : user.status === 'Active' ? 'Активен' : user.status === 'Trial' ? 'Триал (активен)' : user.status === 'Expired' ? 'Истёк' : user.status],
               ].map(([l, v]) => (
                 <div key={String(l)} className="inset" style={{ padding: 12 }}>
                   <div className="eyebrow mb-1">{l}</div>
@@ -797,29 +827,52 @@ const UserDetailPage: React.FC<{
                   </div>
                 </div>
               ))}
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-              <div>
-                <label className="field-label">Email (привязка / смена)</label>
-                <div className="flex gap-2">
-                  <input className="input mono" type="email" value={editEmail} onChange={e => setEditEmail(e.target.value)} placeholder="user@example.com" />
-                  <button className="btn solid" disabled={saving === 'set_email'} onClick={() => update('set_email', editEmail.trim() || null)}>
-                    {saving === 'set_email' ? <Spinner size={14} /> : <Save size={14} />}
-                  </button>
-                </div>
-                <div className="sub mt-1" style={{ fontSize: 11 }}>Пустое значение отвяжет email</div>
+              {/* Editable: Email */}
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-1">Email</div>
+                {editEmail !== null ? (
+                  <div className="flex items-center gap-2">
+                    <input className="input mono" type="email" value={editEmail} onChange={e => setEditEmail(e.target.value)}
+                      placeholder="user@example.com" style={{ fontSize: 13, padding: '3px 8px', flex: 1 }}
+                      onKeyDown={e => { if (e.key === 'Enter') { update('set_email', editEmail.trim() || null); setEditEmail(null!); } if (e.key === 'Escape') setEditEmail(null!); }}
+                      autoFocus />
+                    <button className="btn sm solid" disabled={saving === 'set_email'} onClick={() => { update('set_email', editEmail.trim() || null); setEditEmail(null!); }}>
+                      {saving === 'set_email' ? <Spinner size={12} /> : <Check size={12} />}
+                    </button>
+                    <button className="btn sm" onClick={() => setEditEmail(null!)}><X size={12} /></button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="mono" style={{ fontSize: 13 }}>{user.email || '—'}</span>
+                    {user.email && <button onClick={() => copyText(user.email!)} style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0 }}><Copy size={12} className="faint" /></button>}
+                    <button onClick={() => setEditEmail(user.email || '')} style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0 }} title="Изменить"><Edit size={12} className="faint" /></button>
+                  </div>
+                )}
               </div>
-              <div>
-                <label className="field-label">Telegram ID (привязка / смена)</label>
-                <div className="flex gap-2">
-                  <input className="input mono" type="text" value={editTelegram} onChange={e => setEditTelegram(e.target.value)} placeholder="123456789" />
-                  <button className="btn solid" disabled={saving === 'set_telegram'} onClick={() => update('set_telegram', editTelegram.trim() || null)}>
-                    {saving === 'set_telegram' ? <Spinner size={14} /> : <Save size={14} />}
-                  </button>
-                </div>
-                <div className="sub mt-1" style={{ fontSize: 11 }}>Пустое значение отвяжет Telegram (нужен email)</div>
+              {/* Editable: Telegram ID */}
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-1">Telegram ID</div>
+                {editTelegram !== null ? (
+                  <div className="flex items-center gap-2">
+                    <input className="input mono" type="text" value={editTelegram} onChange={e => setEditTelegram(e.target.value)}
+                      placeholder="123456789" style={{ fontSize: 13, padding: '3px 8px', flex: 1 }}
+                      onKeyDown={e => { if (e.key === 'Enter') { update('set_telegram', editTelegram.trim() || null); setEditTelegram(null!); } if (e.key === 'Escape') setEditTelegram(null!); }}
+                      autoFocus />
+                    <button className="btn sm solid" disabled={saving === 'set_telegram'} onClick={() => { update('set_telegram', editTelegram.trim() || null); setEditTelegram(null!); }}>
+                      {saving === 'set_telegram' ? <Spinner size={12} /> : <Check size={12} />}
+                    </button>
+                    <button className="btn sm" onClick={() => setEditTelegram(null!)}><X size={12} /></button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="mono" style={{ fontSize: 13 }}>{user.telegram_id != null ? String(user.telegram_id) : '—'}</span>
+                    {user.telegram_id != null && <button onClick={() => copyText(String(user.telegram_id))} style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0 }}><Copy size={12} className="faint" /></button>}
+                    <button onClick={() => setEditTelegram(user.telegram_id != null ? String(user.telegram_id) : '')} style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0 }} title="Изменить"><Edit size={12} className="faint" /></button>
+                  </div>
+                )}
               </div>
             </div>
+
           </div>
 
           {/* Referral system */}
@@ -878,6 +931,23 @@ const UserDetailPage: React.FC<{
             </div>
           </div>
 
+          {/* Trial reset */}
+          <div className="card" style={{ padding: 20 }}>
+            <h3 className="h-sec mb-2">Пробный период</h3>
+            <div className="flex items-center gap-4 flex-wrap">
+              <div className="sub" style={{ fontSize: 13 }}>
+                {user.trial_used ? 'Пробный период использован.' : 'Пробный период ещё не использован.'}
+              </div>
+              {user.trial_used ? (
+                <button className="btn" disabled={saving === 'reset_trial'} onClick={() => update('reset_trial', null)}>
+                  {saving === 'reset_trial' ? <Spinner size={14} /> : <><RefreshCw size={14} /> Сбросить триал</>}
+                </button>
+              ) : (
+                <span className="badge solid" style={{ fontSize: 12 }}>Доступен</span>
+              )}
+            </div>
+          </div>
+
           {/* Ban/Unban */}
           <div className="card" style={{ padding: 20 }}>
             <h3 className="h-sec mb-4">Блокировка</h3>
@@ -894,6 +964,13 @@ const UserDetailPage: React.FC<{
             ) : (
               <button className="btn danger" onClick={() => setBanModal(true)}><Ban size={14} /> Заблокировать</button>
             )}
+          </div>
+
+          {/* Delete account */}
+          <div className="card" style={{ padding: 20, border: '1px solid var(--danger, #e53e3e)' }}>
+            <h3 className="h-sec mb-2" style={{ color: 'var(--danger, #e53e3e)' }}>Опасная зона</h3>
+            <p className="sub mb-4" style={{ fontSize: 13 }}>Полное удаление аккаунта из базы данных. Это действие необратимо — все данные, ключи и транзакции будут удалены.</p>
+            <button className="btn danger" onClick={() => setDeleteModal(true)}><Trash2 size={14} /> Удалить аккаунт полностью</button>
           </div>
         </div>
       )}
@@ -926,12 +1003,19 @@ const UserDetailPage: React.FC<{
                   </div>
                 </div>
 
-                {/* Key info grid */}
+                {/* Key info grid — editable cells */}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+                  {/* Срок: extend/reduce via pencil */}
                   <div className="inset" style={{ padding: 12 }}>
-                    <div className="eyebrow mb-1">Истекает</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="eyebrow">Истекает</div>
+                      <div className="flex gap-1">
+                        <button title="Продлить" style={{ background: 'none', border: 0, cursor: 'pointer', padding: 2 }} onClick={() => { setExtendModal({ rw_uuid: rk.uuid, current_expire: rk.expire_at }); setExtendDays(''); }}><Plus size={11} className="faint" /></button>
+                        <button title="Уменьшить" style={{ background: 'none', border: 0, cursor: 'pointer', padding: 2 }} onClick={() => { setReduceModal({ rw_uuid: rk.uuid }); setReduceDays(''); }}><Clock size={11} className="faint" /></button>
+                      </div>
+                    </div>
                     <div style={{ fontWeight: 500, fontSize: 13 }}>{rk.expire_at ? fmtDate(rk.expire_at) : '—'}</div>
-                    {days !== null && <div className={`sub mt-1 ${days < 7 ? '' : ''}`}>{days > 0 ? `${days} дней` : 'Истёк'}</div>}
+                    {days !== null && <div className="sub mt-1">{days > 0 ? `${days} дней` : 'Истёк'}</div>}
                   </div>
                   <div className="inset" style={{ padding: 12 }}>
                     <div className="eyebrow mb-1">Последнее подключение</div>
@@ -941,21 +1025,29 @@ const UserDetailPage: React.FC<{
                     <div className="eyebrow mb-1">Первое подключение</div>
                     <div style={{ fontWeight: 500, fontSize: 13 }}>{fmtDate(rk.first_connected_at)}</div>
                   </div>
+                  {/* Трафик с карандашом */}
                   <div className="inset" style={{ padding: 12 }}>
-                    <div className="eyebrow mb-1">Трафик</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="eyebrow">Трафик</div>
+                      <button title="Изменить лимит" style={{ background: 'none', border: 0, cursor: 'pointer', padding: 2 }} onClick={() => { setTrafficModal({ rw_uuid: rk.uuid, current_gb: limitGb }); setTrafficGb(String(limitGb.toFixed(0))); }}><Edit size={11} className="faint" /></button>
+                    </div>
                     <div style={{ fontWeight: 500, fontSize: 13 }}>{fmtGB(rk.traffic_used_bytes)} / {limitGb > 0 ? fmtGB(rk.traffic_limit_bytes) : '∞'}</div>
                     <div className="meter mt-2"><i className={usedPct > 90 ? 'crit' : usedPct > 70 ? 'warn' : ''} style={{ width: `${usedPct}%` }} /></div>
                   </div>
+                  {/* Устройства с карандашом */}
                   <div className="inset" style={{ padding: 12 }}>
-                    <div className="eyebrow mb-1">Лимит HWID-устройств</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="eyebrow">HWID-устройства</div>
+                      <button title="Изменить лимит" style={{ background: 'none', border: 0, cursor: 'pointer', padding: 2 }} onClick={() => { setDevicesModal({ rw_uuid: rk.uuid, current: rk.hwid_device_limit }); setDevicesVal(String(rk.hwid_device_limit ?? '')); }}><Edit size={11} className="faint" /></button>
+                    </div>
                     <div style={{ fontWeight: 500, fontSize: 13 }}>{rk.hwid_device_limit ?? '∞'}</div>
                   </div>
+                  {/* Сквады с карандашом */}
                   <div className="inset" style={{ padding: 12 }}>
-                    <div className="eyebrow mb-1">Lifetime трафик</div>
-                    <div style={{ fontWeight: 500, fontSize: 13 }}>{fmtGB(rk.lifetime_traffic_bytes)}</div>
-                  </div>
-                  <div className="inset" style={{ padding: 12 }}>
-                    <div className="eyebrow mb-1">Сквады Remnawave</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="eyebrow">Сквады</div>
+                      <button title="Изменить" style={{ background: 'none', border: 0, cursor: 'pointer', padding: 2 }} onClick={() => { const cur = parseKeySquads(rk.active_internal_squads); setSquadsModal({ rw_uuid: rk.uuid, current: cur }); setSelectedSquads(cur); }}><Edit size={11} className="faint" /></button>
+                    </div>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {parseKeySquads(rk.active_internal_squads).length === 0
                         ? <span className="muted" style={{ fontSize: 12 }}>Не назначены</span>
@@ -972,13 +1064,8 @@ const UserDetailPage: React.FC<{
                   <button onClick={() => copyText(rk.subscription_url)} style={{ background: 'none', border: 0, cursor: 'pointer', marginLeft: 8 }}><Copy size={11} className="faint" /></button>
                 </div>
 
-                {/* Actions */}
+                {/* Block/Unblock only */}
                 <div className="flex flex-wrap gap-2 mb-4">
-                  <button className="btn sm" onClick={() => { setExtendModal({ rw_uuid: rk.uuid, current_expire: rk.expire_at }); setExtendDays(''); }}><Plus size={13} /> Продлить</button>
-                  <button className="btn sm" onClick={() => { setReduceModal({ rw_uuid: rk.uuid }); setReduceDays(''); }}><Clock size={13} /> Уменьшить срок</button>
-                  <button className="btn sm" onClick={() => { setTrafficModal({ rw_uuid: rk.uuid, current_gb: limitGb }); setTrafficGb(String(limitGb.toFixed(0))); }}><Database size={13} /> Трафик</button>
-                  <button className="btn sm" onClick={() => { setDevicesModal({ rw_uuid: rk.uuid, current: rk.hwid_device_limit }); setDevicesVal(String(rk.hwid_device_limit ?? '')); }}><Smartphone size={13} /> Устройства</button>
-                  <button className="btn sm" onClick={() => { const cur = parseKeySquads(rk.active_internal_squads); setSquadsModal({ rw_uuid: rk.uuid, current: cur }); setSelectedSquads(cur); }}><Layers size={13} /> Сквады</button>
                   {rk.status === 'ACTIVE'
                     ? <button className="btn sm danger" onClick={() => update('rw_block', null, { rw_uuid: rk.uuid })}><Ban size={13} /> Заблокировать ключ</button>
                     : <button className="btn sm solid" onClick={() => update('rw_unblock', null, { rw_uuid: rk.uuid })}><CheckCircle size={13} /> Разблокировать ключ</button>
@@ -1073,14 +1160,14 @@ const UserDetailPage: React.FC<{
                   : user.transactions.map(tx => (
                     <tr key={tx.id}>
                       <td className="muted mono">#{tx.id}</td>
-                      <td className="faint" style={{ fontSize: 12 }}>{tx.type}</td>
-                      <td style={{ fontWeight: 600, color: tx.amount > 0 ? 'var(--text)' : 'var(--muted)' }}>{tx.amount > 0 ? '+' : ''}{tx.amount} ₽</td>
-                      <td><span className={`badge ${tx.status === 'Success' ? 'solid' : tx.status === 'Pending' ? 'mute' : 'danger'}`}>{tx.status}</span></td>
+                      <td className="faint" style={{ fontSize: 12 }}>{tx.type === "trial" ? "Пробная" : tx.type === "subscription" ? "Покупка" : tx.type === "subscription_extend" ? "Продление" : tx.type === "refund" ? "Возврат" : tx.type === "deposit" ? "Пополнение" : tx.type || "—"}</td>
+                      <td style={{ fontWeight: 600 }}>{Math.abs(tx.amount).toLocaleString('ru-RU')} ₽</td>
+                      <td><span className={`badge ${tx.status === 'Success' ? 'solid' : tx.status === 'Pending' ? 'mute' : 'danger'}`}>{tx.status === 'Success' ? 'Успешно' : tx.status === 'Refunded' ? 'Возвращён' : tx.status === 'Pending' ? 'Обработка' : tx.status}</span></td>
                       <td className="muted">{tx.payment_provider || tx.payment_method || '—'}</td>
                       <td className="faint" style={{ fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description || '—'}</td>
                       <td className="faint">{fmtDateShort(tx.created_at)}</td>
                       <td>
-                        {tx.type === 'deposit' && tx.status === 'Success' && tx.amount > 0 && (
+                        {['subscription', 'subscription_extend'].includes(tx.type) && tx.status === 'Success' && tx.amount > 0 && (
                           <button
                             className="btn sm danger"
                             disabled={saving === `refund_${tx.id}`}
@@ -1115,6 +1202,28 @@ const UserDetailPage: React.FC<{
       )}
 
       {/* ── MODALS ── */}
+      {deleteModal && (
+        <Modal onClose={() => setDeleteModal(false)} title="Удалить аккаунт" icon={Trash2} width={420}
+          footer={<>
+            <button className="btn block" onClick={() => setDeleteModal(false)}>Отмена</button>
+            <button className="btn block danger" disabled={saving === 'delete_account'} onClick={async () => {
+              setSaving('delete_account');
+              try {
+                await apiFetch(`/panel/users/${user.id}/delete`, { method: 'DELETE' });
+                onToast('Аккаунт удалён', undefined, 'success');
+                setDeleteModal(false);
+                onBack();
+              } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
+              setSaving('');
+            }}>
+              {saving === 'delete_account' ? <Spinner size={14} /> : 'Удалить безвозвратно'}
+            </button>
+          </>}
+        >
+          <p style={{ fontSize: 14 }}>Вы уверены, что хотите <b>полностью удалить</b> аккаунт пользователя <b>@{user.username || user.id}</b>?</p>
+          <p className="sub mt-2" style={{ fontSize: 13 }}>Будут удалены: все VPN-ключи (включая в Remnawave), транзакции, сессии, реферальные данные.</p>
+        </Modal>
+      )}
       {banModal && (
         <Modal onClose={() => setBanModal(false)} title="Заблокировать пользователя" icon={Ban} width={400}
           footer={<>
@@ -1290,7 +1399,7 @@ const ReferralsList: React.FC<{ userId: number; onToast: (t: string, m?: string,
 // ─── USERS PAGE ───────────────────────────────────────────────────
 const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenUser }) => {
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'Trial' | 'Active' | 'Banned'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'None' | 'Trial' | 'Active' | 'Expired' | 'Banned'>('all');
   const [users, setUsers] = useState<PanelUser[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -1314,10 +1423,13 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
         const mapped: PanelUser[] = raw.map((u: any) => ({
           id: u.id, telegram_id: u.telegram_id, email: u.email || null,
           username: u.username, full_name: u.full_name,
-          balance: u.balance ?? 0, status: u.status || 'Trial',
+          balance: u.balance ?? 0, status: u.status || 'New',
           registration_date: u.registration_date,
           is_banned: u.is_banned || 0, in_blacklist: !!u.in_blacklist,
-          partner_balance: u.partner_balance ?? 0, partner_rate: u.partner_rate ?? 20,
+          partner_balance: u.partner_balance ?? 0, partner_rate: u.partner_rate ?? 30,
+          expiry_date: u.expiry_date || null,
+          traffic_used: u.traffic_used ?? null,
+          traffic_limit: u.traffic_limit ?? null,
         }));
         const filtered = statusFilter === 'all' ? mapped : mapped.filter(u =>
           statusFilter === 'Banned' ? (u.is_banned || u.in_blacklist) : u.status === statusFilter
@@ -1331,7 +1443,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
   }, [debouncedSearch, statusFilter, page]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const filterLabels = { all: 'Все', Trial: 'Триал', Active: 'Активные', Banned: 'Забл.' };
+  const filterLabels: Record<string, string> = { all: 'Все', None: 'Без подписки', Trial: 'Триал', Active: 'Активные', Expired: 'Истёкшие', Banned: 'Забл.' };
 
   return (
     <div className="flex flex-col gap-6 rise">
@@ -1347,7 +1459,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
           </button>
           {showFilter && (
             <div className="menu" style={{ right: 0 }}>
-              {(['all', 'Trial', 'Active', 'Banned'] as const).map(f => (
+              {(['all', 'None', 'Trial', 'Active', 'Expired', 'Banned'] as const).map(f => (
                 <button key={f} className="menu-item" onClick={() => { setStatusFilter(f); setShowFilter(false); }}>{filterLabels[f]}</button>
               ))}
             </div>
@@ -1356,7 +1468,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
       </div>
       <div className="tbl-wrap">
         <table className="tbl">
-          <thead><tr><th>Пользователь</th><th>Статус</th><th>Реф. баланс</th><th>Процент</th><th>Регистрация</th></tr></thead>
+          <thead><tr><th>Пользователь</th><th>Статус</th><th>Ключ / Трафик</th><th>Реф. баланс</th><th>Регистрация</th></tr></thead>
           <tbody>
             {loading ? (
               <tr className="empty-row"><td colSpan={5}><Spinner /></td></tr>
@@ -1367,6 +1479,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
               const badge = isBanned ? { cls: 'danger', label: 'Заблокирован' }
                 : u.status === 'Active' ? { cls: 'solid', label: 'Активен' }
                 : u.status === 'Trial' ? { cls: 'mute', label: 'Триал' }
+                : u.status === 'None' || !u.status ? { cls: 'line', label: 'Нет подписки' }
                 : { cls: 'line', label: 'Истёк' };
               return (
                 <tr key={u.id} className="click" onClick={() => onOpenUser(u.id)}>
@@ -1375,8 +1488,17 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
                     <div className="faint mono" style={{ fontSize: 11 }}>{u.email || (u.telegram_id != null ? `tg:${u.telegram_id}` : `id:${u.id}`)}</div>
                   </td>
                   <td><span className={`badge ${badge.cls}`}>{badge.label}</span></td>
+                  <td>
+                    {u.expiry_date ? (
+                      <div style={{ fontSize: 12 }}>
+                        <div className="mono faint" style={{ fontSize: 11 }}>до {fmtDateShort(u.expiry_date)}</div>
+                        {u.traffic_limit != null && u.traffic_limit > 0 && (
+                          <div className="faint" style={{ fontSize: 11 }}>{fmtGB(u.traffic_used ?? 0)} / {fmtGB(u.traffic_limit)}</div>
+                        )}
+                      </div>
+                    ) : <span className="faint" style={{ fontSize: 12 }}>—</span>}
+                  </td>
                   <td className="mono">{fmtM(u.partner_balance)}</td>
-                  <td className="muted">{u.partner_rate}%</td>
                   <td className="faint">{fmtDateShort(u.registration_date)}</td>
                 </tr>
               );
@@ -1768,21 +1890,97 @@ const SquadsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) =>
 
 // ─── SETTINGS PAGE ────────────────────────────────────────────────
 const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) => void; onLogout: () => void }> = ({ onToast, onLogout }) => {
-  const [settings, setSettings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [savingBackup, setSavingBackup] = useState(false);
+  const [savingTariffs, setSavingTariffs] = useState(false);
+  const [sendingBackup, setSendingBackup] = useState(false);
+  // Backup
+  const [backupEnabled, setBackupEnabled] = useState(false);
+  const [intervalMin, setIntervalMin] = useState(360);
+  const [lastBackup, setLastBackup] = useState<string | null>(null);
+  // Tariff plans
+  const [tariffs, setTariffs] = useState<any[]>([]);
+  const [editingTariff, setEditingTariff] = useState<any | null>(null);
+  const [newTariff, setNewTariff] = useState({ plan_type: 'vpn_regular', name: '', price: '', duration_days: '30' });
+  const [showNewTariff, setShowNewTariff] = useState(false);
+  // Trial settings
+  const [trialTariffId, setTrialTariffId] = useState('');
+  const [trialDevices, setTrialDevices] = useState(1);
+  const [paidDevices, setPaidDevices] = useState(2);
 
-  useEffect(() => {
-    apiFetch('/panel/settings').then(d => { if (d) setSettings(d); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
+  const loadAll = async () => {
+    setLoading(true);
     try {
-      await apiFetch('/panel/settings', { method: 'PUT', body: JSON.stringify(settings) });
-      onToast('Настройки сохранены', undefined, 'success');
+      const [bk, tr, sys] = await Promise.all([
+        apiFetch('/panel/backups/status'),
+        apiFetch('/panel/tariffs'),
+        apiFetch('/panel/system-settings'),
+      ]);
+      if (bk) { setBackupEnabled(!!bk.enabled); setIntervalMin(bk.interval_minutes || 360); setLastBackup(bk.last_backup || null); }
+      if (tr) setTariffs(Array.isArray(tr) ? tr : (tr.tariffs || []));
+      if (sys) { setTrialTariffId(String(sys.trial_tariff_id || '')); setTrialDevices(sys.trial_devices_limit || 1); setPaidDevices(sys.paid_devices_limit || 2); }
+    } catch (e: any) { onToast('Ошибка загрузки настроек', e.message, 'error'); }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadAll(); }, []);
+
+  const saveBackup = async () => {
+    setSavingBackup(true);
+    try {
+      await apiFetch('/panel/backups/settings', { method: 'PUT', body: JSON.stringify({ enabled: backupEnabled, interval_minutes: intervalMin }) });
+      onToast('Настройки бэкапов сохранены', undefined, 'success');
     } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
-    setSaving(false);
+    setSavingBackup(false);
+  };
+
+  const sendBackupNow = async () => {
+    setSendingBackup(true);
+    try {
+      await apiFetch('/panel/backups/create', { method: 'POST' });
+      onToast('Бэкап отправлен в Telegram', undefined, 'success');
+      setLastBackup(new Date().toISOString());
+    } catch (e: any) { onToast('Ошибка отправки бэкапа', e.message, 'error'); }
+    setSendingBackup(false);
+  };
+
+  const saveTariffSettings = async () => {
+    setSavingTariffs(true);
+    try {
+      await apiFetch('/panel/system-settings', { method: 'PUT', body: JSON.stringify({ trial_tariff_id: trialTariffId, trial_devices_limit: trialDevices, paid_devices_limit: paidDevices }) });
+      onToast('Настройки тарифов сохранены', undefined, 'success');
+    } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
+    setSavingTariffs(false);
+  };
+
+  const saveTariffEdit = async () => {
+    if (!editingTariff) return;
+    try {
+      await apiFetch(`/panel/tariffs/${editingTariff.id}`, { method: 'PUT', body: JSON.stringify({ name: editingTariff.name, price: parseFloat(editingTariff.price), duration_days: parseInt(editingTariff.duration_days), plan_type: editingTariff.plan_type }) });
+      onToast('Тариф обновлён', undefined, 'success');
+      setEditingTariff(null);
+      loadAll();
+    } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
+  };
+
+  const addTariff = async () => {
+    if (!newTariff.name || !newTariff.price) return;
+    try {
+      await apiFetch('/panel/tariffs', { method: 'POST', body: JSON.stringify({ plan_type: newTariff.plan_type, name: newTariff.name, price: parseFloat(newTariff.price), duration_days: parseInt(newTariff.duration_days) }) });
+      onToast('Тариф добавлен', undefined, 'success');
+      setShowNewTariff(false);
+      setNewTariff({ plan_type: 'vpn_regular', name: '', price: '', duration_days: '30' });
+      loadAll();
+    } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
+  };
+
+  const deleteTariff = async (id: number) => {
+    if (!confirm('Удалить тариф?')) return;
+    try {
+      await apiFetch(`/panel/tariffs/${id}`, { method: 'DELETE' });
+      onToast('Тариф удалён', undefined, 'success');
+      loadAll();
+    } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
   };
 
   const changePassword = async () => {
@@ -1794,30 +1992,162 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
     } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
   };
 
+  const fmtInterval = (min: number) => {
+    if (min < 60) return `${min} мин`;
+    const h = Math.floor(min / 60), m = min % 60;
+    return m > 0 ? `${h} ч ${m} мин` : `${h} ч`;
+  };
+
+  const planLabel = (pt: string) => pt === 'vpn_family' ? 'Семейный' : 'Обычный';
+
   if (loading) return <div className="flex items-center justify-center" style={{ height: 200 }}><Spinner size={28} /></div>;
+
+  const regularTariffs = tariffs.filter(t => t.plan_type === 'vpn_regular');
+  const familyTariffs = tariffs.filter(t => t.plan_type === 'vpn_family');
 
   return (
     <div className="flex flex-col gap-6 rise">
-      <div><div className="h-page">Настройки</div><div className="sub mt-1">Конфигурация системы</div></div>
-      {settings && (
-        <div className="card" style={{ padding: 24 }}>
-          <h3 className="h-sec mb-4">Системные параметры</h3>
-          <div className="flex flex-col gap-4">
-            {Object.entries(settings).map(([k, v]) => typeof v !== 'object' && (
-              <div key={k}>
-                <label className="field-label">{k}</label>
-                <input className="input" value={String(v ?? '')} onChange={e => setSettings((prev: any) => ({ ...prev, [k]: e.target.value }))} />
+      <div><div className="h-page">Настройки</div><div className="sub mt-1">Управление системой</div></div>
+
+      {/* ── ТАРИФЫ ── */}
+      <div className="card" style={{ padding: 24 }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="h-sec">Тарифные планы</h3>
+          <button className="btn sm solid" onClick={() => setShowNewTariff(v => !v)}><Plus size={13} /> Добавить</button>
+        </div>
+
+        {showNewTariff && (
+          <div className="inset mb-4" style={{ padding: 16 }}>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="field-label">Тип тарифа</label>
+                <select className="select" value={newTariff.plan_type} onChange={e => setNewTariff(p => ({ ...p, plan_type: e.target.value }))}>
+                  <option value="vpn_regular">Обычный</option>
+                  <option value="vpn_family">Семейный</option>
+                </select>
               </div>
-            ))}
+              <div>
+                <label className="field-label">Название</label>
+                <input className="input" value={newTariff.name} onChange={e => setNewTariff(p => ({ ...p, name: e.target.value }))} placeholder="1 месяц" />
+              </div>
+              <div>
+                <label className="field-label">Цена (₽)</label>
+                <input className="input" type="number" value={newTariff.price} onChange={e => setNewTariff(p => ({ ...p, price: e.target.value }))} placeholder="499" />
+              </div>
+              <div>
+                <label className="field-label">Дней</label>
+                <input className="input" type="number" value={newTariff.duration_days} onChange={e => setNewTariff(p => ({ ...p, duration_days: e.target.value }))} placeholder="30" />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn solid sm" onClick={addTariff}><Check size={13} /> Сохранить</button>
+              <button className="btn sm" onClick={() => setShowNewTariff(false)}>Отмена</button>
+            </div>
           </div>
-          <div className="flex gap-3 mt-5">
-            <button className="btn solid" disabled={saving} onClick={save}>{saving ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}</button>
+        )}
+
+        {[['Обычный (vpn_regular)', regularTariffs], ['Семейный (vpn_family)', familyTariffs]].map(([label, list]: any) => (
+          <div key={label} className="mb-4">
+            <div className="eyebrow mb-2">{label}</div>
+            <div className="tbl-wrap">
+              <table className="tbl">
+                <thead><tr><th>Название</th><th>Цена</th><th>Дней</th><th></th></tr></thead>
+                <tbody>
+                  {list.length === 0
+                    ? <tr className="empty-row"><td colSpan={4}>Нет тарифов</td></tr>
+                    : list.map((t: any) => editingTariff?.id === t.id ? (
+                      <tr key={t.id}>
+                        <td><input className="input" style={{ padding: '4px 8px', fontSize: 13 }} value={editingTariff.name} onChange={e => setEditingTariff((p: any) => ({ ...p, name: e.target.value }))} /></td>
+                        <td><input className="input" style={{ padding: '4px 8px', fontSize: 13, width: 80 }} type="number" value={editingTariff.price} onChange={e => setEditingTariff((p: any) => ({ ...p, price: e.target.value }))} /></td>
+                        <td><input className="input" style={{ padding: '4px 8px', fontSize: 13, width: 70 }} type="number" value={editingTariff.duration_days} onChange={e => setEditingTariff((p: any) => ({ ...p, duration_days: e.target.value }))} /></td>
+                        <td className="flex gap-1">
+                          <button className="btn sm solid" onClick={saveTariffEdit}><Check size={12} /></button>
+                          <button className="btn sm" onClick={() => setEditingTariff(null)}><X size={12} /></button>
+                        </td>
+                      </tr>
+                    ) : (
+                      <tr key={t.id}>
+                        <td style={{ fontWeight: 500 }}>{t.name}</td>
+                        <td className="mono">{t.price} ₽</td>
+                        <td className="muted">{t.duration_days} дн.</td>
+                        <td className="flex gap-1">
+                          <button className="btn sm" onClick={() => setEditingTariff({ ...t })}><Edit size={12} /></button>
+                          <button className="btn sm danger" onClick={() => deleteTariff(t.id)}><Trash2 size={12} /></button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── ТАРИФ ПОСЛЕ ТРИАЛА ── */}
+      <div className="card" style={{ padding: 24 }}>
+        <h3 className="h-sec mb-1">Тариф после пробного периода</h3>
+        <p className="sub mb-4" style={{ fontSize: 13 }}>Какой тариф подключается автоматически после окончания триала. Именно по его цене и сроку будет списываться рекуррентный платёж.</p>
+        <div className="flex flex-col gap-4">
+          <div>
+            <label className="field-label">Тариф для конвертации триала</label>
+            <select className="select" value={trialTariffId} onChange={e => setTrialTariffId(e.target.value)}>
+              <option value="">— не выбран (использует дефолт 399₽/30дн.) —</option>
+              {tariffs.map(t => (
+                <option key={t.id} value={String(t.id)}>
+                  [{planLabel(t.plan_type)}] {t.name} — {t.price}₽ / {t.duration_days} дн.
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="field-label">Устройств на триале</label>
+              <input className="input" type="number" min="1" max="20" value={trialDevices} onChange={e => setTrialDevices(parseInt(e.target.value) || 1)} style={{ maxWidth: 100 }} />
+            </div>
+            <div>
+              <label className="field-label">Устройств на платной подписке</label>
+              <input className="input" type="number" min="1" max="20" value={paidDevices} onChange={e => setPaidDevices(parseInt(e.target.value) || 2)} style={{ maxWidth: 100 }} />
+            </div>
           </div>
         </div>
-      )}
+        <button className="btn solid mt-4" disabled={savingTariffs} onClick={saveTariffSettings}>
+          {savingTariffs ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}
+        </button>
+      </div>
+
+      {/* ── БЭКАПЫ ── */}
+      <div className="card" style={{ padding: 24 }}>
+        <h3 className="h-sec mb-4">Автоматические бэкапы</h3>
+        <p className="sub mb-4" style={{ fontSize: 13 }}>Бэкап базы данных отправляется всем администраторам в Telegram ровно в xx:00 выбранного периода.</p>
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <input type="checkbox" id="backup-enabled" checked={backupEnabled} onChange={e => setBackupEnabled(e.target.checked)} style={{ width: 18, height: 18, cursor: 'pointer' }} />
+            <label htmlFor="backup-enabled" style={{ fontSize: 14, cursor: 'pointer' }}>Включить автоматические бэкапы</label>
+          </div>
+          <div>
+            <label className="field-label">Интервал (минуты)</label>
+            <div className="flex items-center gap-3">
+              <input className="input" type="number" min="10" max="10080" value={intervalMin} onChange={e => setIntervalMin(Math.max(10, parseInt(e.target.value) || 360))} style={{ maxWidth: 140 }} />
+              <span className="muted" style={{ fontSize: 13 }}>= {fmtInterval(intervalMin)}</span>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-2">
+              {[60, 180, 360, 720, 1440].map(v => (
+                <button key={v} className={`btn sm ${intervalMin === v ? 'solid' : ''}`} onClick={() => setIntervalMin(v)}>{fmtInterval(v)}</button>
+              ))}
+            </div>
+          </div>
+          {lastBackup && <div className="sub" style={{ fontSize: 12 }}>Последний бэкап: {new Date(lastBackup).toLocaleString('ru-RU')}</div>}
+        </div>
+        <div className="flex gap-3 mt-5 flex-wrap">
+          <button className="btn solid" disabled={savingBackup} onClick={saveBackup}>{savingBackup ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}</button>
+          <button className="btn" disabled={sendingBackup} onClick={sendBackupNow}>{sendingBackup ? <Spinner size={14} /> : <><Database size={14} /> Отправить бэкап сейчас</>}</button>
+        </div>
+      </div>
+
+      {/* ── БЕЗОПАСНОСТЬ ── */}
       <div className="card" style={{ padding: 24 }}>
         <h3 className="h-sec mb-4">Безопасность</h3>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
           <button className="btn" onClick={changePassword}><Lock size={14} /> Изменить пароль</button>
           <button className="btn danger" onClick={onLogout}><X size={14} /> Выйти из системы</button>
         </div>
@@ -1850,8 +2180,8 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
       setTransactions(raw.map((tx: any) => ({
         id: tx.id,
         user: tx.user || tx.username || tx.telegram_id || '—',
-        amount: tx.amount || 0,
-        type: tx.type || (tx.amount > 0 ? 'deposit' : 'expense'),
+        amount: Math.abs(tx.amount || 0),
+        type: tx.type || 'subscription',
         status: tx.status || '—',
         method: tx.payment_method || tx.payment_provider || '—',
         date: tx.created_at ? new Date(tx.created_at).toLocaleDateString('ru-RU') : '—',
@@ -1910,7 +2240,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
 
   const nav = [
     { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Финансы', icon: DollarSign }, { name: 'Статистика', icon: BarChart2 }] },
-    { group: 'Данные', items: [{ name: 'Пользователи', icon: Users }, { name: 'Ключи', icon: Key }] },
+    { group: 'Данные', items: [{ name: 'Пользователи', icon: Users }] },
     { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Gift }] },
     { group: 'Система', items: [{ name: 'Сквады', icon: Layers }, { name: 'Настройки', icon: Settings }] },
   ];
@@ -1997,7 +2327,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
               )}
               {activePage === 'Статистика' && <StatisticsPage />}
               {activePage === 'Пользователи' && <UsersPage onOpenUser={openUser} />}
-              {activePage === 'Ключи' && <KeysPage onToast={addToast} />}
+
               {activePage === 'Рассылка' && <MailingPage onToast={addToast} />}
               {activePage === 'Промокоды' && <PromocodesPage onToast={addToast} />}
               {activePage === 'Сквады' && <SquadsPage onToast={addToast} />}
