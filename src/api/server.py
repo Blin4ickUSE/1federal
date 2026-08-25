@@ -857,8 +857,8 @@ def get_user_history(_user=None):
         rows = cursor.fetchall()
         history = []
         for row in rows:
-            type_map = {'subscription': 'payment', 'subscription_extend': 'renewal', 'trial': 'payment', 'deposit': 'payment'}
-            title_map = {'subscription': 'Оплата подписки', 'subscription_extend': 'Продление подписки', 'trial': 'Оплата пробного периода', 'deposit': 'Оплата'}
+            type_map = {'subscription': 'payment', 'subscription_extend': 'renewal'}
+            title_map = {'subscription': 'Покупка подписки', 'subscription_extend': 'Продление подписки'}
             trans_type = type_map.get(row['type'], row['type'])
             title = row['description'] or title_map.get(row['type'], row['type'])
             from datetime import datetime
@@ -1182,7 +1182,8 @@ def _compute_user_status(user_id: int, trial_used: int, is_banned: int, cursor) 
     )
     key = cursor.fetchone()
     if not key:
-        return 'Trial' if not trial_used else 'Expired'
+        # Никогда не было подписки
+        return 'None'
     exp = key['expiry_date']
     is_active = key['status'] == 'Active'
     if exp:
@@ -1194,8 +1195,8 @@ def _compute_user_status(user_id: int, trial_used: int, is_banned: int, cursor) 
             pass
     if not is_active:
         return 'Expired'
-    plan = key['plan_type'] or ''
-    if 'trial' in plan.lower() or not trial_used:
+    # Активный ключ: если триал ещё не завершён — Trial, иначе Active
+    if not trial_used:
         return 'Trial'
     return 'Active'
 
@@ -1221,6 +1222,24 @@ def get_users():
             user['id'], int(user.get('trial_used') or 0),
             int(user.get('is_banned') or 0), cursor2
         )
+        # Добавляем данные активного ключа прямо в список
+        cursor2.execute(
+            """
+            SELECT expiry_date, traffic_used, traffic_limit
+            FROM vpn_keys WHERE user_id = ? AND status = 'Active'
+            ORDER BY expiry_date DESC LIMIT 1
+            """,
+            (user['id'],),
+        )
+        key_row = cursor2.fetchone()
+        if key_row:
+            user['expiry_date'] = key_row['expiry_date']
+            user['traffic_used'] = key_row['traffic_used']
+            user['traffic_limit'] = key_row['traffic_limit']
+        else:
+            user['expiry_date'] = None
+            user['traffic_used'] = None
+            user['traffic_limit'] = None
     conn2.close()
     return jsonify({'users': raw_users, 'total': total, 'limit': limit, 'offset': offset})
 
@@ -1481,7 +1500,7 @@ def get_transactions():
     conn = database.get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("\n            SELECT \n                t.id,\n                t.user_id,\n                u.username,\n                t.type,\n                t.amount,\n                t.status,\n                t.payment_method,\n                t.payment_provider,\n                t.payment_id,\n                t.hash,\n                t.created_at\n            FROM transactions t\n            LEFT JOIN users u ON t.user_id = u.id\n            WHERE t.type IN ('subscription', 'subscription_extend', 'trial', 'deposit')\n              AND t.status = 'Success'\n              AND COALESCE(t.payment_method, '') != 'Admin'\n            ORDER BY t.created_at DESC\n            LIMIT ? OFFSET ?\n        ", (limit, offset))
+        cursor.execute("\n            SELECT \n                t.id,\n                t.user_id,\n                u.username,\n                t.type,\n                t.amount,\n                t.status,\n                t.payment_method,\n                t.payment_provider,\n                t.payment_id,\n                t.hash,\n                t.created_at\n            FROM transactions t\n            LEFT JOIN users u ON t.user_id = u.id\n            WHERE t.type IN ('subscription', 'subscription_extend')\n              AND t.status = 'Success'\n              AND COALESCE(t.payment_method, '') != 'Admin'\n            ORDER BY t.created_at DESC\n            LIMIT ? OFFSET ?\n        ", (limit, offset))
         rows = cursor.fetchall()
         transactions = []
         for row in rows:
@@ -1503,7 +1522,7 @@ def refund_transaction(transaction_id: int):
         transaction = cursor.fetchone()
         if not transaction:
             return (jsonify({'success': False, 'error': 'Транзакция не найдена'}), 404)
-        if transaction['type'] not in ('deposit', 'subscription', 'subscription_extend', 'trial'):
+        if transaction['type'] not in ('subscription', 'subscription_extend'):
             return (jsonify({'success': False, 'error': 'Возврат возможен только для платежей за подписку'}), 400)
         if transaction['status'] == 'Refunded':
             return (jsonify({'success': False, 'error': 'Транзакция уже была возвращена'}), 400)
@@ -1946,14 +1965,14 @@ def get_user_remnawave_devices(user_id: int):
             async with api as a:
                 return await a._make_request('GET', f'/api/users/{rw_uuid}/hwid')
         resp = asyncio.run(_fetch())
-        raw = resp.get('response', [])
-        # Remnawave может вернуть {'response': [...]} или {'response': {'hwids': [...]}}
+        logger.debug(f'HWID raw response for {rw_uuid}: {str(resp)[:500]}')
+        # Remnawave возвращает {"response": [...]} — массив HWID-объектов
+        raw = resp if isinstance(resp, list) else resp.get('response', resp.get('data', []))
         if isinstance(raw, dict):
-            devices = raw.get('hwids', raw.get('data', raw.get('items', [])))
-        elif isinstance(raw, list):
-            devices = raw
-        else:
-            devices = []
+            # вложенный объект: {'hwids': [...]} или {'items': [...]}
+            raw = raw.get('hwids', raw.get('items', raw.get('data', [])))
+        devices = raw if isinstance(raw, list) else []
+        logger.info(f'HWID devices for {rw_uuid}: {len(devices)} found')
         return jsonify(devices)
     except Exception as e:
         logger.warning(f'Failed to fetch HWID devices for {rw_uuid}: {e}')
@@ -2607,7 +2626,7 @@ def get_user_referrals(_user=None):
     try:
         cursor.execute('\n            SELECT id, username, full_name, registration_date\n            FROM users\n            WHERE referred_by = ?\n            ORDER BY registration_date DESC\n            ', (user['id'],))
         referrals_rows = cursor.fetchall()
-        rate = user.get('partner_rate', 20) / 100
+        rate = user.get('partner_rate', 30) / 100
         referrals = []
         for r in referrals_rows:
             ref_id = r['id']
@@ -2779,14 +2798,14 @@ def get_stats_summary():
         active_keys = cursor.fetchone()['cnt'] or 0
         now = datetime.utcnow()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend', 'trial', 'deposit')\n              AND created_at >= ?\n              AND status = 'Success'\n            ", (month_start.isoformat(),))
+        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend')\n              AND created_at >= ?\n              AND status = 'Success'\n            ", (month_start.isoformat(),))
         monthly_revenue = float(cursor.fetchone()['total'] or 0)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         cursor.execute(
             """
             SELECT COALESCE(SUM(ABS(amount)), 0) AS total
             FROM transactions
-            WHERE type IN ('subscription', 'subscription_extend', 'trial', 'deposit')
+            WHERE type IN ('subscription', 'subscription_extend')
               AND created_at >= ?
               AND status = 'Success'
             """,
@@ -2829,7 +2848,7 @@ def get_finance_stats():
     cursor = conn.cursor()
     from datetime import datetime, timedelta
     try:
-        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type IN ('deposit', 'subscription', 'subscription_extend', 'trial') AND status = 'Success'\n        ")
+        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n        ")
         deposits_row = cursor.fetchone()
         deposits_total = float(deposits_row['total'] or 0)
         deposits_count = deposits_row['cnt'] or 0
@@ -2842,7 +2861,7 @@ def get_finance_stats():
         now = datetime.utcnow()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
-        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('deposit', 'subscription', 'subscription_extend', 'trial') AND status = 'Success'\n              AND created_at >= ? AND created_at < ?\n        ", (prev_month_start.isoformat(), month_start.isoformat()))
+        cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n              AND created_at >= ? AND created_at < ?\n        ", (prev_month_start.isoformat(), month_start.isoformat()))
         prev_deposits = float(cursor.fetchone()['total'] or 0)
         cursor.execute("\n            SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n            FROM transactions\n            WHERE type IN ('referral_withdrawal', 'refund', 'withdrawal', 'admin_withdrawal')\n              AND status = 'Success'\n              AND created_at >= ? AND created_at < ?\n        ", (prev_month_start.isoformat(), month_start.isoformat()))
         prev_withdrawals = float(cursor.fetchone()['total'] or 0)
@@ -2868,7 +2887,7 @@ def get_full_statistics():
         cursor.execute("SELECT COUNT(*) AS cnt FROM vpn_keys WHERE status = 'Active'")
         active_subscriptions = cursor.fetchone()['cnt'] or 0
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        cursor.execute("\n            SELECT COUNT(*) AS cnt FROM transactions\n            WHERE type IN ('deposit', 'subscription', 'subscription_extend', 'trial') AND status = 'Success' AND created_at >= ?\n        ", (today_start.isoformat(),))
+        cursor.execute("\n            SELECT COUNT(*) AS cnt FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success' AND created_at >= ?\n        ", (today_start.isoformat(),))
         payments_today = cursor.fetchone()['cnt'] or 0
         cursor.execute('SELECT COALESCE(SUM(balance), 0) AS total FROM users')
         clients_balance = float(cursor.fetchone()['total'] or 0)
@@ -2879,7 +2898,7 @@ def get_full_statistics():
             day = (datetime.utcnow() - timedelta(days=period_days - 1 - i)).date()
             day_start = datetime.combine(day, datetime.min.time())
             day_end = day_start + timedelta(days=1)
-            cursor.execute("\n                SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n                FROM transactions\n                WHERE type IN ('deposit', 'subscription', 'subscription_extend', 'trial') AND status = 'Success'\n                  AND created_at >= ? AND created_at < ?\n            ", (day_start.isoformat(), day_end.isoformat()))
+            cursor.execute("\n                SELECT COALESCE(SUM(ABS(amount)), 0) AS total\n                FROM transactions\n                WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n                  AND created_at >= ? AND created_at < ?\n            ", (day_start.isoformat(), day_end.isoformat()))
             revenue_data.append(float(cursor.fetchone()['total'] or 0))
             revenue_labels.append(day.strftime(label_fmt))
         cursor.execute("\n            SELECT COUNT(DISTINCT user_id) AS cnt FROM vpn_keys \n            WHERE status = 'Active' AND expiry_date > datetime('now')\n        ")
@@ -2892,7 +2911,7 @@ def get_full_statistics():
         expired_users = cursor.fetchone()['cnt'] or 0
         sleeping_users = max(0, total_users - active_users - trial_users - banned_users - expired_users)
         user_dist_data = [{'label': 'Активные', 'value': active_users}, {'label': 'Ушли', 'value': expired_users}, {'label': 'Trial', 'value': trial_users}, {'label': 'Бан', 'value': banned_users}, {'label': 'Спящие', 'value': sleeping_users}]
-        cursor.execute("\n            SELECT payment_method, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type IN ('deposit', 'subscription', 'subscription_extend', 'trial') AND status = 'Success'\n            GROUP BY payment_method\n        ")
+        cursor.execute("\n            SELECT payment_method, COUNT(*) AS cnt\n            FROM transactions\n            WHERE type IN ('subscription', 'subscription_extend') AND status = 'Success'\n            GROUP BY payment_method\n        ")
         payment_methods_raw = cursor.fetchall()
         total_payments = sum((row['cnt'] for row in payment_methods_raw)) or 1
         payment_methods_data = []
@@ -2936,7 +2955,7 @@ def get_full_statistics():
         top_referrers = []
         for idx, row in enumerate(top_referrers_raw, 1):
             username = row['username'] or f"id{row['id']}"
-            rate = row['partner_rate'] or 20
+            rate = row['partner_rate'] or 30
             total_spent = float(row['total_spent'] or 0)
             earned = total_spent * (rate / 100)
             top_referrers.append({'id': idx, 'name': f'@{username}' if not username.startswith('@') else username, 'count': row['referrals_count'] or 0, 'earned': earned})

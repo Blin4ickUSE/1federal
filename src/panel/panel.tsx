@@ -448,25 +448,29 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
     <div className="flex flex-col gap-6 rise">
       <div><div className="h-page">Финансы</div><div className="sub mt-1">Доходы, операции и возвраты CloudPayments</div></div>
       <div className="grid grid-cols-2 gap-4">
-        <Stat title="Пополнения" value={stats ? fmtM(stats.deposits) : '—'} icon={ArrowUpRight} />
-        <Stat title="Успешные операции" value={stats ? fmtN(stats.successfulOps) : '—'} icon={Activity} sub="операций" />
+        <Stat title="Доход" value={stats ? fmtM(stats.deposits) : '—'} icon={ArrowUpRight} />
+        <Stat title="Успешные платежи" value={stats ? fmtN(stats.successfulOps) : '—'} icon={Activity} sub="платежей" />
       </div>
       <div className="tbl-wrap">
         <div style={{ overflowX: 'auto' }}>
           <table className="tbl">
-            <thead><tr><th>ID</th><th>Пользователь</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead>
+            <thead><tr><th>ID</th><th>Пользователь</th><th>Тип</th><th>Сумма</th><th>Способ</th><th>Дата</th></tr></thead>
             <tbody>
               {transactions.length === 0
-                ? <tr className="empty-row"><td colSpan={5}>Пока нет операций</td></tr>
-                : transactions.map(tx => (
+                ? <tr className="empty-row"><td colSpan={6}>Пока нет операций</td></tr>
+                : transactions.map(tx => {
+                  const typeLabel = tx.type === 'subscription' ? 'Покупка' : tx.type === 'subscription_extend' ? 'Продление' : tx.type || '—';
+                  return (
                   <tr key={tx.id} className="click" onClick={() => onSelect(tx)}>
                     <td className="muted mono">#{tx.id}</td>
                     <td className="muted">{tx.user}</td>
-                    <td style={{ fontWeight: 600, color: tx.amount > 0 ? 'var(--text)' : 'var(--muted)' }}>{tx.amount > 0 ? '+' : ''}{tx.amount} ₽</td>
-                    <td className="muted">{tx.status}</td>
+                    <td><span className={`badge ${tx.type === 'subscription_extend' ? 'mute' : 'solid'}`}>{typeLabel}</span></td>
+                    <td style={{ fontWeight: 600 }}>{tx.amount} ₽</td>
+                    <td className="faint" style={{ fontSize: 12 }}>{tx.method}</td>
                     <td className="faint">{tx.date}</td>
                   </tr>
-                ))}
+                  );
+                })}
             </tbody>
           </table>
         </div>
@@ -478,7 +482,7 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
 // ─── TRANSACTION MODAL ───────────────────────────────────────────
 const TransactionModal: React.FC<{ tx: any; onClose: () => void; onRefunded?: () => void; onToast?: (t: string, m?: string, ty?: ToastType) => void }> = ({ tx, onClose, onRefunded, onToast }) => {
   const [busy, setBusy] = useState(false);
-  const canRefund = tx.amount > 0 && String(tx.status).toLowerCase() === 'success' && (tx.type === 'deposit' || !tx.type);
+  const canRefund = tx.amount > 0 && String(tx.status).toLowerCase() === 'success' && ['subscription', 'subscription_extend'].includes(tx.type);
 
   const doRefund = async () => {
     if (!canRefund || !confirm(`Вернуть ${tx.amount}₽ через CloudPayments?`)) return;
@@ -667,7 +671,7 @@ const UserDetailPage: React.FC<{
     try {
       const d = await apiFetch(`/panel/users/by-id/${userId}`);
       setUser(d);
-      setEditRate(String(d.partner_rate ?? 20));
+      setEditRate(String(d.partner_rate ?? 30));
       setEditBalance(String(d.partner_balance ?? 0));
       setEditEmail(d.email || '');
       setEditTelegram(d.telegram_id != null ? String(d.telegram_id) : '');
@@ -815,7 +819,7 @@ const UserDetailPage: React.FC<{
                 ['Отображаемое имя', user.full_name || '—'],
                 ['Реферальный код', user.referral_code || '—'],
                 ['Регистрация', fmtDate(user.registration_date)],
-                ['Статус', user.status],
+                ['Статус', user.status === 'None' ? '— (нет подписки)' : user.status === 'Active' ? 'Активен' : user.status === 'Trial' ? 'Триал' : user.status === 'Expired' ? 'Истёк' : user.status || '—'],
               ].map(([l, v]) => (
                 <div key={String(l)} className="inset" style={{ padding: 12 }}>
                   <div className="eyebrow mb-1">{l}</div>
@@ -1108,14 +1112,14 @@ const UserDetailPage: React.FC<{
                   : user.transactions.map(tx => (
                     <tr key={tx.id}>
                       <td className="muted mono">#{tx.id}</td>
-                      <td className="faint" style={{ fontSize: 12 }}>{tx.type}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{tx.type === "subscription" ? "Покупка" : tx.type === "subscription_extend" ? "Продление" : tx.type || "—"}</td>
                       <td style={{ fontWeight: 600, color: tx.amount > 0 ? 'var(--text)' : 'var(--muted)' }}>{tx.amount > 0 ? '+' : ''}{tx.amount} ₽</td>
                       <td><span className={`badge ${tx.status === 'Success' ? 'solid' : tx.status === 'Pending' ? 'mute' : 'danger'}`}>{tx.status}</span></td>
                       <td className="muted">{tx.payment_provider || tx.payment_method || '—'}</td>
                       <td className="faint" style={{ fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description || '—'}</td>
                       <td className="faint">{fmtDateShort(tx.created_at)}</td>
                       <td>
-                        {tx.type === 'deposit' && tx.status === 'Success' && tx.amount > 0 && (
+                        {['subscription', 'subscription_extend'].includes(tx.type) && tx.status === 'Success' && tx.amount > 0 && (
                           <button
                             className="btn sm danger"
                             disabled={saving === `refund_${tx.id}`}
@@ -1347,7 +1351,7 @@ const ReferralsList: React.FC<{ userId: number; onToast: (t: string, m?: string,
 // ─── USERS PAGE ───────────────────────────────────────────────────
 const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenUser }) => {
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'Trial' | 'Active' | 'Banned'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'None' | 'Trial' | 'Active' | 'Expired' | 'Banned'>('all');
   const [users, setUsers] = useState<PanelUser[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -1371,10 +1375,13 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
         const mapped: PanelUser[] = raw.map((u: any) => ({
           id: u.id, telegram_id: u.telegram_id, email: u.email || null,
           username: u.username, full_name: u.full_name,
-          balance: u.balance ?? 0, status: u.status || 'Trial',
+          balance: u.balance ?? 0, status: u.status || 'New',
           registration_date: u.registration_date,
           is_banned: u.is_banned || 0, in_blacklist: !!u.in_blacklist,
-          partner_balance: u.partner_balance ?? 0, partner_rate: u.partner_rate ?? 20,
+          partner_balance: u.partner_balance ?? 0, partner_rate: u.partner_rate ?? 30,
+          expiry_date: u.expiry_date || null,
+          traffic_used: u.traffic_used ?? null,
+          traffic_limit: u.traffic_limit ?? null,
         }));
         const filtered = statusFilter === 'all' ? mapped : mapped.filter(u =>
           statusFilter === 'Banned' ? (u.is_banned || u.in_blacklist) : u.status === statusFilter
@@ -1388,7 +1395,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
   }, [debouncedSearch, statusFilter, page]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const filterLabels = { all: 'Все', Trial: 'Триал', Active: 'Активные', Banned: 'Забл.' };
+  const filterLabels: Record<string, string> = { all: 'Все', None: 'Без подписки', Trial: 'Триал', Active: 'Активные', Expired: 'Истёкшие', Banned: 'Забл.' };
 
   return (
     <div className="flex flex-col gap-6 rise">
@@ -1404,7 +1411,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
           </button>
           {showFilter && (
             <div className="menu" style={{ right: 0 }}>
-              {(['all', 'Trial', 'Active', 'Banned'] as const).map(f => (
+              {(['all', 'None', 'Trial', 'Active', 'Expired', 'Banned'] as const).map(f => (
                 <button key={f} className="menu-item" onClick={() => { setStatusFilter(f); setShowFilter(false); }}>{filterLabels[f]}</button>
               ))}
             </div>
@@ -1413,7 +1420,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
       </div>
       <div className="tbl-wrap">
         <table className="tbl">
-          <thead><tr><th>Пользователь</th><th>Статус</th><th>Реф. баланс</th><th>Процент</th><th>Регистрация</th></tr></thead>
+          <thead><tr><th>Пользователь</th><th>Статус</th><th>Ключ / Трафик</th><th>Реф. баланс</th><th>Регистрация</th></tr></thead>
           <tbody>
             {loading ? (
               <tr className="empty-row"><td colSpan={5}><Spinner /></td></tr>
@@ -1424,6 +1431,7 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
               const badge = isBanned ? { cls: 'danger', label: 'Заблокирован' }
                 : u.status === 'Active' ? { cls: 'solid', label: 'Активен' }
                 : u.status === 'Trial' ? { cls: 'mute', label: 'Триал' }
+                : u.status === 'None' ? { cls: 'mute', label: '—' }
                 : { cls: 'line', label: 'Истёк' };
               return (
                 <tr key={u.id} className="click" onClick={() => onOpenUser(u.id)}>
@@ -1432,8 +1440,17 @@ const UsersPage: React.FC<{ onOpenUser: (userId: number) => void }> = ({ onOpenU
                     <div className="faint mono" style={{ fontSize: 11 }}>{u.email || (u.telegram_id != null ? `tg:${u.telegram_id}` : `id:${u.id}`)}</div>
                   </td>
                   <td><span className={`badge ${badge.cls}`}>{badge.label}</span></td>
+                  <td>
+                    {u.expiry_date ? (
+                      <div style={{ fontSize: 12 }}>
+                        <div className="mono faint" style={{ fontSize: 11 }}>до {fmtDateShort(u.expiry_date)}</div>
+                        {u.traffic_limit != null && u.traffic_limit > 0 && (
+                          <div className="faint" style={{ fontSize: 11 }}>{fmtGB(u.traffic_used ?? 0)} / {fmtGB(u.traffic_limit)}</div>
+                        )}
+                      </div>
+                    ) : <span className="faint" style={{ fontSize: 12 }}>—</span>}
+                  </td>
                   <td className="mono">{fmtM(u.partner_balance)}</td>
-                  <td className="muted">{u.partner_rate}%</td>
                   <td className="faint">{fmtDateShort(u.registration_date)}</td>
                 </tr>
               );
@@ -1973,7 +1990,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
         id: tx.id,
         user: tx.user || tx.username || tx.telegram_id || '—',
         amount: tx.amount || 0,
-        type: tx.type || (tx.amount > 0 ? 'deposit' : 'expense'),
+        type: tx.type || 'subscription',
         status: tx.status || '—',
         method: tx.payment_method || tx.payment_provider || '—',
         date: tx.created_at ? new Date(tx.created_at).toLocaleDateString('ru-RU') : '—',
@@ -2032,7 +2049,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
 
   const nav = [
     { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Финансы', icon: DollarSign }, { name: 'Статистика', icon: BarChart2 }] },
-    { group: 'Данные', items: [{ name: 'Пользователи', icon: Users }, { name: 'Ключи', icon: Key }] },
+    { group: 'Данные', items: [{ name: 'Пользователи', icon: Users }] },
     { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Gift }] },
     { group: 'Система', items: [{ name: 'Сквады', icon: Layers }, { name: 'Настройки', icon: Settings }] },
   ];
@@ -2119,7 +2136,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
               )}
               {activePage === 'Статистика' && <StatisticsPage />}
               {activePage === 'Пользователи' && <UsersPage onOpenUser={openUser} />}
-              {activePage === 'Ключи' && <KeysPage onToast={addToast} />}
+
               {activePage === 'Рассылка' && <MailingPage onToast={addToast} />}
               {activePage === 'Промокоды' && <PromocodesPage onToast={addToast} />}
               {activePage === 'Сквады' && <SquadsPage onToast={addToast} />}
