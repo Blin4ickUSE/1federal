@@ -464,6 +464,30 @@ def handle_pay(data: dict) -> None:
         except Exception as exc:
             logger.error('Developer share accrual failed: %s', exc)
 
+        # Начисляем реферальный доход (30% реферреру)
+        try:
+            ref_result = database.credit_referral_income(
+                user_id,
+                float(amount),
+                payment_id=str(transaction_id or invoice_id),
+            )
+            if ref_result:
+                logger.info(
+                    'Referral income: %s₽ → referrer_id=%s for user_id=%s',
+                    ref_result['income'], ref_result['referrer_id'], user_id,
+                )
+                try:
+                    core.send_notification_to_user(
+                        ref_result['referrer_telegram_id'],
+                        f'💰 <b>Реферальный доход!</b>\n\n'
+                        f'Ваш реферал {"активировал пробный период" if is_trial else "оплатил подписку"}.\n'
+                        f'Ваше вознаграждение: <b>{ref_result["income"]:.0f}₽</b>',
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.error('Referral income accrual failed: %s', exc)
+
         # BUG FIX: создаём VPN-ключ сразу при оплате через webhook
         user = database.get_user_by_id(user_id)
         _sub_result = None

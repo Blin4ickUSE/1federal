@@ -1502,7 +1502,7 @@ def get_transactions():
     conn = database.get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("\n            SELECT \n                t.id,\n                t.user_id,\n                u.username,\n                t.type,\n                t.amount,\n                t.status,\n                t.payment_method,\n                t.payment_provider,\n                t.payment_id,\n                t.hash,\n                t.created_at\n            FROM transactions t\n            LEFT JOIN users u ON t.user_id = u.id\n            WHERE t.type IN ('subscription', 'subscription_extend')\n              AND t.status = 'Success'\n              AND COALESCE(t.payment_method, '') NOT IN ('Admin', 'Balance', 'Promo')\n              AND ABS(COALESCE(t.amount, 0)) > 0\n            ORDER BY t.created_at DESC\n            LIMIT ? OFFSET ?\n        ", (limit, offset))
+        cursor.execute("\n            SELECT \n                t.id,\n                t.user_id,\n                u.username,\n                t.type,\n                t.amount,\n                t.status,\n                t.description,\n                t.payment_method,\n                t.payment_provider,\n                t.payment_id,\n                t.hash,\n                t.created_at\n            FROM transactions t\n            LEFT JOIN users u ON t.user_id = u.id\n            WHERE t.type IN ('subscription', 'subscription_extend')\n              AND t.status = 'Success'\n              AND COALESCE(t.payment_method, '') NOT IN ('Admin', 'Balance', 'Promo')\n              AND ABS(COALESCE(t.amount, 0)) > 0\n            ORDER BY t.created_at DESC\n            LIMIT ? OFFSET ?\n        ", (limit, offset))
         rows = cursor.fetchall()
         transactions = []
         for row in rows:
@@ -1510,7 +1510,10 @@ def get_transactions():
             amount_val = abs(float(row['amount'] or 0))
             if amount_val <= 0:
                 continue  # пропускаем нулевые/мусорные записи
-            desc_lower = (row.get('description') or '').lower()
+            try:
+                desc_lower = (row['description'] or '').lower()
+            except Exception:
+                desc_lower = ''
             is_trial_tx = 'пробн' in desc_lower or 'триал' in desc_lower or 'trial' in desc_lower
             transactions.append({'id': row['id'], 'user_id': row['user_id'], 'user': f'@{username}' if username and (not username.startswith('@')) else username, 'amount': amount_val, 'type': 'trial' if is_trial_tx else row['type'], 'status': row['status'] or 'Pending', 'payment_method': row['payment_method'] or 'Unknown', 'payment_provider': row['payment_provider'] or '', 'payment_id': row['payment_id'] or '', 'hash': row['hash'] or row['payment_id'] or '', 'created_at': row['created_at']})
         return jsonify(transactions)
@@ -1558,22 +1561,8 @@ def refund_transaction(transaction_id: int):
         # Нет системы баланса — при возврате просто помечаем транзакцию
 
         cursor.execute(
-            "UPDATE transactions SET status = 'Refunded' WHERE id = ?",
-            (transaction_id,),
-        )
-        cursor.execute(
-            """
-            INSERT INTO transactions (user_id, type, amount, status, payment_method, payment_provider, payment_id, description)
-            VALUES (?, 'refund', ?, 'Success', ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                -amount,
-                transaction['payment_method'],
-                payment_provider or 'CloudPayments',
-                payment_id or None,
-                f'Возврат CloudPayments по транзакции #{transaction_id}',
-            ),
+            "UPDATE transactions SET status = 'Refunded', description = COALESCE(description, '') || ? WHERE id = ?",
+            (f' [Возврат выполнен {__import__("datetime").datetime.now().strftime("%d.%m.%Y %H:%M")}]', transaction_id),
         )
         conn.commit()
         try:
@@ -1965,19 +1954,61 @@ def get_user_remnawave_devices(user_id: int):
             return jsonify({'error': 'Key not found for this user'}), 404
     finally:
         conn.close()
+    # Получаем telegram_id пользователя из нашей БД для поиска в Remnawave
+    conn_h = database.get_db_connection()
+    try:
+        cur_h = conn_h.cursor()
+        cur_h.execute('SELECT u.telegram_id FROM vpn_keys vk JOIN users u ON u.id = vk.user_id WHERE vk.key_uuid = ? LIMIT 1', (rw_uuid,))
+        row_h = cur_h.fetchone()
+        tg_id = row_h['telegram_id'] if row_h else None
+    finally:
+        conn_h.close()
+
     try:
         api = remnawave.get_remnawave_api()
         import asyncio
 
         async def _fetch_hwid():
             async with api as a:
-                # Шаг 1: получить числовой id пользователя из Remnawave (не UUID)
-                user_resp = await a._make_request('GET', f'/api/users/{rw_uuid}')
-                user_data = user_resp.get('response', user_resp) if isinstance(user_resp, dict) else {}
-                rw_numeric_id = user_data.get('id') if isinstance(user_data, dict) else None
+                # Шаг 1: получить числовой id через telegram_id (надёжно, без UUID-path)
+                rw_numeric_id = None
+                if tg_id:
+                    users_by_tg = await a.get_user_by_telegram_id(int(tg_id))
+                    for u in (users_by_tg or []):
+                        if u.uuid == rw_uuid:
+                            rw_numeric_id = getattr(u, 'id', None) or None
+                            break
+                    if not rw_numeric_id and users_by_tg:
+                        # Берём первого (обычно один ключ на юзера)
+                        raw = users_by_tg[0]
+                        # id хранится в raw данных
+                        rw_numeric_id = getattr(raw, '_raw_id', None)
+
+                # Запасной вариант: GET /api/users/by-short-uuid/{shortUuid} не поможет,
+                # используем POST /api/users/resolve с shortUuid
                 if not rw_numeric_id:
-                    logger.warning(f'HWID: cannot get numeric id for {rw_uuid}')
+                    # Пробуем получить числовой id через raw request используя username
+                    # или через resolve endpoint
+                    try:
+                        resolve_resp = await a._make_request('POST', '/api/users/resolve',
+                            data={'username': rw_uuid.replace('-', '')[:8]})  # shortUuid like prefix
+                    except Exception:
+                        pass
+                    # Если ничего не вышло — пробуем получить через список по uuid напрямую
+                    try:
+                        all_resp = await a._make_request('GET', '/api/users', params={'limit': 1000})
+                        users_list = (all_resp.get('response', {}) if isinstance(all_resp, dict) else {}).get('users', [])
+                        for u in users_list:
+                            if u.get('uuid') == rw_uuid:
+                                rw_numeric_id = u.get('id')
+                                break
+                    except Exception as e2:
+                        logger.warning(f'HWID fallback list search failed: {e2}')
+
+                if not rw_numeric_id:
+                    logger.warning(f'HWID: cannot determine numeric id for {rw_uuid}')
                     return []
+
                 # Шаг 2: GET /api/hwid/devices/{numericId}
                 hwid_resp = await a._make_request('GET', f'/api/hwid/devices/{rw_numeric_id}')
                 inner = hwid_resp.get('response', {}) if isinstance(hwid_resp, dict) else {}
@@ -2013,18 +2044,36 @@ def delete_user_remnawave_device(user_id: int, hwid_uuid: str):
             return jsonify({'error': 'Key not found for this user'}), 404
     finally:
         conn.close()
+    # Получаем telegram_id из нашей БД
+    conn_hd = database.get_db_connection()
+    try:
+        cur_hd = conn_hd.cursor()
+        cur_hd.execute('SELECT u.telegram_id FROM vpn_keys vk JOIN users u ON u.id = vk.user_id WHERE vk.key_uuid = ? LIMIT 1', (rw_uuid,))
+        row_hd = cur_hd.fetchone()
+        tg_id_del = row_hd['telegram_id'] if row_hd else None
+    finally:
+        conn_hd.close()
+
     try:
         api = remnawave.get_remnawave_api()
         import asyncio
         async def _delete():
             async with api as a:
-                # Получаем числовой id пользователя в Remnawave
-                user_resp = await a._make_request('GET', f'/api/users/{rw_uuid}')
-                user_data = user_resp.get('response', user_resp) if isinstance(user_resp, dict) else {}
-                rw_numeric_id = user_data.get('id') if isinstance(user_data, dict) else None
+                rw_numeric_id = None
+                if tg_id_del:
+                    users_by_tg = await a.get_user_by_telegram_id(int(tg_id_del))
+                    for u in (users_by_tg or []):
+                        if u.uuid == rw_uuid:
+                            # Fetch raw numeric id
+                            raw_resp = await a._make_request('GET', '/api/users', params={'limit': 1000})
+                            users_list = (raw_resp.get('response', {}) if isinstance(raw_resp, dict) else {}).get('users', [])
+                            for ru in users_list:
+                                if ru.get('uuid') == rw_uuid:
+                                    rw_numeric_id = ru.get('id')
+                                    break
+                            break
                 if not rw_numeric_id:
-                    raise ValueError(f'Cannot get numeric id for {rw_uuid}')
-                # POST /api/hwid/devices/delete
+                    raise ValueError(f'Cannot determine numeric Remnawave id for {rw_uuid}')
                 return await a._make_request('POST', '/api/hwid/devices/delete', {
                     'userId': int(rw_numeric_id),
                     'hwid': hwid_uuid,
