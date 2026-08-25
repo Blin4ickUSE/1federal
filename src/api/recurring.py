@@ -36,13 +36,15 @@ def _get_trial_conversion_params() -> tuple:
     """
     tariff = database.get_trial_tariff()
     if tariff:
-        devices = int(database.get_system_setting('paid_devices_limit') or tariff.get('devices_limit') or 2)
+        is_family = tariff['plan_type'] == 'vpn_family'
+        devices_key = 'family_devices_limit' if is_family else 'paid_devices_limit'
+        devices = int(database.get_system_setting(devices_key) or (5 if is_family else 2))
         return (
             float(tariff['price']),
             int(tariff['duration_days']),
             devices,
             tariff['plan_type'],
-            'family' if tariff['plan_type'] == 'vpn_family' else 'regular',
+            'family' if is_family else 'regular',
         )
     # Фолбэк на хардкод если тариф не настроен
     return (MONTHLY_REGULAR_PRICE, MONTHLY_REGULAR_DAYS, MONTHLY_REGULAR_DEVICES, 'vpn_regular', 'regular')

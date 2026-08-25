@@ -719,7 +719,12 @@ const UserDetailPage: React.FC<{
     setLoadingDevices(prev => ({ ...prev, [rw_uuid]: true }));
     try {
       const d = await apiFetch(`/panel/users/${user_id}/remnawave-devices?rw_uuid=${rw_uuid}`);
-      setDevicesMap(prev => ({ ...prev, [rw_uuid]: Array.isArray(d) ? d : [] }));
+      if (d && d.unsupported) {
+        // Remnawave не поддерживает HWID-эндпоинт
+        setDevicesMap(prev => ({ ...prev, [rw_uuid]: 'unsupported' as any }));
+      } else {
+        setDevicesMap(prev => ({ ...prev, [rw_uuid]: Array.isArray(d) ? d : [] }));
+      }
     } catch {
       setDevicesMap(prev => ({ ...prev, [rw_uuid]: [] }));
     }
@@ -1080,22 +1085,23 @@ const UserDetailPage: React.FC<{
                     {devList && <button className="btn ghost sm" onClick={() => { setDevicesMap(prev => { const n = { ...prev }; delete n[rk.uuid]; return n; }); }}>Обновить</button>}
                   </div>
                   {devLoading && <div className="flex items-center gap-2 muted" style={{ fontSize: 13 }}><Spinner size={14} /> Загрузка...</div>}
-                  {devList && devList.length === 0 && <p className="muted" style={{ fontSize: 13 }}>Нет привязанных устройств</p>}
-                  {devList && devList.length > 0 && (
+                  {devList === 'unsupported' as any && <p className="muted" style={{ fontSize: 13 }}>⚠️ Ваша версия Remnawave не поддерживает просмотр HWID-устройств</p>}
+                  {Array.isArray(devList) && devList.length === 0 && <p className="muted" style={{ fontSize: 13 }}>Нет привязанных устройств</p>}
+                  {Array.isArray(devList) && devList.length > 0 && (
                     <div className="flex flex-col gap-2">
                       {devList.map((dev, idx) => {
-                        const devId = dev.id || dev.hwid || dev.uuid || String(idx);
+                        const devId = dev.hwid || dev.id || dev.uuid || String(idx);
                         return (
                           <div key={devId} className="inset" style={{ padding: 12 }}>
                             <div className="flex items-start justify-between gap-2">
                               <div>
-                                <div style={{ fontWeight: 500, fontSize: 13 }}>{dev.deviceName || dev.platform || 'Неизвестное устройство'}</div>
+                                <div style={{ fontWeight: 500, fontSize: 13 }}>{dev.deviceModel || dev.platform || 'Неизвестное устройство'}{dev.osVersion ? ` (${dev.osVersion})` : ''}</div>
                                 <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
-                                  {dev.ip && <span className="faint mono" style={{ fontSize: 11 }}>IP: {dev.ip}</span>}
+                                  {dev.requestIp && <span className="faint mono" style={{ fontSize: 11 }}>IP: {dev.requestIp}</span>}
                                   {dev.userAgent && <span className="faint" style={{ fontSize: 11 }}>{dev.userAgent.slice(0, 60)}</span>}
                                   {dev.createdAt && <span className="faint" style={{ fontSize: 11 }}>Добавлено: {fmtDate(dev.createdAt)}</span>}
                                   {dev.updatedAt && <span className="faint" style={{ fontSize: 11 }}>Обновлено: {fmtDate(dev.updatedAt)}</span>}
-                                  {devId && <span className="faint mono" style={{ fontSize: 11 }}>HWID: {devId}</span>}
+                                  {dev.hwid && <span className="faint mono" style={{ fontSize: 11 }}>HWID: {dev.hwid}</span>}
                                 </div>
                               </div>
                               <button className="btn sm danger" onClick={() => deleteDevice(rk.uuid, devId, user.id)}><Trash2 size={12} /></button>
@@ -1907,6 +1913,10 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
   const [trialTariffId, setTrialTariffId] = useState('');
   const [trialDevices, setTrialDevices] = useState(1);
   const [paidDevices, setPaidDevices] = useState(2);
+  const [familyDevices, setFamilyDevices] = useState(5);
+  const [trialTrafficGb, setTrialTrafficGb] = useState(10);
+  const [paidTrafficGb, setPaidTrafficGb] = useState(10240);
+  const [familyTrafficGb, setFamilyTrafficGb] = useState(10240);
 
   const loadAll = async () => {
     setLoading(true);
@@ -1918,7 +1928,7 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
       ]);
       if (bk) { setBackupEnabled(!!bk.enabled); setIntervalMin(bk.interval_minutes || 360); setLastBackup(bk.last_backup || null); }
       if (tr) setTariffs(Array.isArray(tr) ? tr : (tr.tariffs || []));
-      if (sys) { setTrialTariffId(String(sys.trial_tariff_id || '')); setTrialDevices(sys.trial_devices_limit || 1); setPaidDevices(sys.paid_devices_limit || 2); }
+      if (sys) { setTrialTariffId(String(sys.trial_tariff_id || '')); setTrialDevices(sys.trial_devices_limit || 1); setPaidDevices(sys.paid_devices_limit || 2); setFamilyDevices(sys.family_devices_limit || 5); setTrialTrafficGb(sys.trial_traffic_gb || 10); setPaidTrafficGb(sys.paid_traffic_gb || 10240); setFamilyTrafficGb(sys.family_traffic_gb || 10240); }
     } catch (e: any) { onToast('Ошибка загрузки настроек', e.message, 'error'); }
     setLoading(false);
   };
@@ -1947,7 +1957,7 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
   const saveTariffSettings = async () => {
     setSavingTariffs(true);
     try {
-      await apiFetch('/panel/system-settings', { method: 'PUT', body: JSON.stringify({ trial_tariff_id: trialTariffId, trial_devices_limit: trialDevices, paid_devices_limit: paidDevices }) });
+      await apiFetch('/panel/system-settings', { method: 'PUT', body: JSON.stringify({ trial_tariff_id: trialTariffId, trial_devices_limit: trialDevices, paid_devices_limit: paidDevices, family_devices_limit: familyDevices, trial_traffic_gb: trialTrafficGb, paid_traffic_gb: paidTrafficGb, family_traffic_gb: familyTrafficGb }) });
       onToast('Настройки тарифов сохранены', undefined, 'success');
     } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
     setSavingTariffs(false);
@@ -2083,35 +2093,79 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
         ))}
       </div>
 
-      {/* ── ТАРИФ ПОСЛЕ ТРИАЛА ── */}
+      {/* ── ТАРИФ ПОСЛЕ ТРИАЛА И ЛИМИТЫ ── */}
       <div className="card" style={{ padding: 24 }}>
-        <h3 className="h-sec mb-1">Тариф после пробного периода</h3>
-        <p className="sub mb-4" style={{ fontSize: 13 }}>Какой тариф подключается автоматически после окончания триала. Именно по его цене и сроку будет списываться рекуррентный платёж.</p>
-        <div className="flex flex-col gap-4">
+        <h3 className="h-sec mb-1">Лимиты подписок</h3>
+        <p className="sub mb-4" style={{ fontSize: 13 }}>Настройте тариф после триала и лимиты устройств/трафика для каждого типа подписки.</p>
+        <div className="flex flex-col gap-5">
+
+          {/* Тариф после триала */}
           <div>
-            <label className="field-label">Тариф для конвертации триала</label>
+            <label className="field-label">Тариф для автоконвертации после триала</label>
             <select className="select" value={trialTariffId} onChange={e => setTrialTariffId(e.target.value)}>
-              <option value="">— не выбран (использует дефолт 399₽/30дн.) —</option>
+              <option value="">— не выбран (дефолт: 399₽ / 30 дн.) —</option>
               {tariffs.map(t => (
                 <option key={t.id} value={String(t.id)}>
                   [{planLabel(t.plan_type)}] {t.name} — {t.price}₽ / {t.duration_days} дн.
                 </option>
               ))}
             </select>
+            <div className="sub mt-1" style={{ fontSize: 12 }}>После окончания триала рекуррент спишет именно эту сумму и продлит на этот срок</div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="field-label">Устройств на триале</label>
-              <input className="input" type="number" min="1" max="20" value={trialDevices} onChange={e => setTrialDevices(parseInt(e.target.value) || 1)} style={{ maxWidth: 100 }} />
-            </div>
-            <div>
-              <label className="field-label">Устройств на платной подписке</label>
-              <input className="input" type="number" min="1" max="20" value={paidDevices} onChange={e => setPaidDevices(parseInt(e.target.value) || 2)} style={{ maxWidth: 100 }} />
+
+          {/* Устройства по типам */}
+          <div>
+            <div className="field-label mb-2">Лимит устройств (HWID)</div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-2">🔬 Триал</div>
+                <input className="input" type="number" min="1" max="20" value={trialDevices}
+                  onChange={e => setTrialDevices(parseInt(e.target.value) || 1)} style={{ maxWidth: 80 }} />
+                <div className="sub mt-1" style={{ fontSize: 11 }}>По умолчанию: 1</div>
+              </div>
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-2">📱 Обычный</div>
+                <input className="input" type="number" min="1" max="20" value={paidDevices}
+                  onChange={e => setPaidDevices(parseInt(e.target.value) || 2)} style={{ maxWidth: 80 }} />
+                <div className="sub mt-1" style={{ fontSize: 11 }}>По умолчанию: 2</div>
+              </div>
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-2">👨‍👩‍👧 Семейный</div>
+                <input className="input" type="number" min="1" max="20" value={familyDevices}
+                  onChange={e => setFamilyDevices(parseInt(e.target.value) || 5)} style={{ maxWidth: 80 }} />
+                <div className="sub mt-1" style={{ fontSize: 11 }}>По умолчанию: 5</div>
+              </div>
             </div>
           </div>
+
+          {/* Трафик */}
+          <div>
+            <div className="field-label mb-2">Лимит трафика (ГБ)</div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-2">🔬 Триал</div>
+                <input className="input" type="number" min="1" value={trialTrafficGb}
+                  onChange={e => setTrialTrafficGb(parseInt(e.target.value) || 10)} style={{ maxWidth: 90 }} />
+                <div className="sub mt-1" style={{ fontSize: 11 }}>По умолчанию: 10 ГБ</div>
+              </div>
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-2">📱 Обычный</div>
+                <input className="input" type="number" min="1" value={paidTrafficGb}
+                  onChange={e => setPaidTrafficGb(parseInt(e.target.value) || 10240)} style={{ maxWidth: 90 }} />
+                <div className="sub mt-1" style={{ fontSize: 11 }}>По умолчанию: 10 240 ГБ (10 ТБ)</div>
+              </div>
+              <div className="inset" style={{ padding: 12 }}>
+                <div className="eyebrow mb-2">👨‍👩‍👧 Семейный</div>
+                <input className="input" type="number" min="1" value={familyTrafficGb}
+                  onChange={e => setFamilyTrafficGb(parseInt(e.target.value) || 10240)} style={{ maxWidth: 90 }} />
+                <div className="sub mt-1" style={{ fontSize: 11 }}>По умолчанию: 10 240 ГБ (10 ТБ)</div>
+              </div>
+            </div>
+          </div>
+
         </div>
-        <button className="btn solid mt-4" disabled={savingTariffs} onClick={saveTariffSettings}>
-          {savingTariffs ? <Spinner size={14} /> : <><Save size={14} /> Сохранить</>}
+        <button className="btn solid mt-5" disabled={savingTariffs} onClick={saveTariffSettings}>
+          {savingTariffs ? <Spinner size={14} /> : <><Save size={14} /> Сохранить настройки подписок</>}
         </button>
       </div>
 

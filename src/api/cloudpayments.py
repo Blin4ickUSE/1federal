@@ -468,9 +468,9 @@ def handle_pay(data: dict) -> None:
         user = database.get_user_by_id(user_id)
         _sub_result = None
         if is_trial:
-            # Триал: 1 устройство, 10 ГБ
-            TRIAL_TRAFFIC_BYTES = int(10 * 1024 ** 3)
-            TRIAL_DEVICES = 1
+            # Триал: лимиты из настроек панели
+            TRIAL_TRAFFIC_BYTES = int(int(database.get_system_setting('trial_traffic_gb') or 10) * 1024 ** 3)
+            TRIAL_DEVICES = int(database.get_system_setting('trial_devices_limit') or 1)
             _sub_result = core.create_user_and_subscription(
                 telegram_id=user.get('telegram_id') if user else None,
                 username=user.get('username', '') if user else '',
@@ -493,9 +493,18 @@ def handle_pay(data: dict) -> None:
             else:
                 logger.error('handle_pay: failed to create trial VPN key for user %s', user_id)
         else:
-            # Обычная подписка: 2 устройства, трафик без реального лимита (10 ТБ)
-            PAID_TRAFFIC_BYTES = int(10 * 1024 ** 4)  # 10 TB
-            PAID_DEVICES = int(intent.get('devices_limit') or 2)
+            # Подписка: лимиты из настроек панели (по типу тарифа)
+            is_family = str(intent.get('plan_type') or '').endswith('family')
+            if is_family:
+                _traffic_key = 'family_traffic_gb'
+                _devices_key = 'family_devices_limit'
+                _default_devices = 5
+            else:
+                _traffic_key = 'paid_traffic_gb'
+                _devices_key = 'paid_devices_limit'
+                _default_devices = 2
+            PAID_TRAFFIC_BYTES = int(int(database.get_system_setting(_traffic_key) or 10240) * 1024 ** 3)
+            PAID_DEVICES = int(database.get_system_setting(_devices_key) or _default_devices)
             _sub_result = core.create_user_and_subscription(
                 telegram_id=user.get('telegram_id') if user else None,
                 username=user.get('username', '') if user else '',

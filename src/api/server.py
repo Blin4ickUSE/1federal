@@ -1969,46 +1969,23 @@ def get_user_remnawave_devices(user_id: int):
         api = remnawave.get_remnawave_api()
         import asyncio
 
-        async def _fetch_user():
+        async def _fetch_hwid():
             async with api as a:
-                # Получаем сырой объект пользователя — устройства могут быть вложены в него
-                user_raw = await a.get_user_raw(rw_uuid)
-                logger.debug(f'RW user keys for {rw_uuid}: {list(user_raw.keys()) if isinstance(user_raw, dict) else type(user_raw)}')
-                return user_raw
+                # Шаг 1: получить числовой id пользователя из Remnawave (не UUID)
+                user_resp = await a._make_request('GET', f'/api/users/{rw_uuid}')
+                user_data = user_resp.get('response', user_resp) if isinstance(user_resp, dict) else {}
+                rw_numeric_id = user_data.get('id') if isinstance(user_data, dict) else None
+                if not rw_numeric_id:
+                    logger.warning(f'HWID: cannot get numeric id for {rw_uuid}')
+                    return []
+                # Шаг 2: GET /api/hwid/devices/{numericId}
+                hwid_resp = await a._make_request('GET', f'/api/hwid/devices/{rw_numeric_id}')
+                inner = hwid_resp.get('response', {}) if isinstance(hwid_resp, dict) else {}
+                devices = inner.get('devices', []) if isinstance(inner, dict) else []
+                logger.info(f'HWID for {rw_uuid} (rw_id={rw_numeric_id}): {len(devices)} devices')
+                return devices
 
-        resp = asyncio.run(_fetch_user())
-
-        # Ищем HWID-устройства во всех возможных местах ответа (get_user_raw уже убрал обёртку)
-        user_data = resp if isinstance(resp, dict) else {}
-        if isinstance(user_data, dict):
-            # Пробуем все известные поля где Remnawave может хранить устройства
-            devices = (
-                user_data.get('hwids') or
-                user_data.get('hwidDevices') or
-                user_data.get('devices') or
-                user_data.get('activeDevices') or
-                user_data.get('connectedDevices') or
-                []
-            )
-            # Если устройств нет в прямых полях — смотрим вложенный userTraffic
-            if not devices:
-                traffic = user_data.get('userTraffic') or {}
-                devices = traffic.get('hwids') or traffic.get('devices') or []
-        elif isinstance(user_data, list):
-            devices = user_data
-        else:
-            devices = []
-
-        if not isinstance(devices, list):
-            devices = []
-
-        # Если нет устройств — возвращаем мета-информацию из пользователя для отладки
-        if not devices and isinstance(user_data, dict):
-            hwid_limit = user_data.get('hwidDeviceLimit')
-            logger.info(f'HWID devices for {rw_uuid}: 0 found, hwidDeviceLimit={hwid_limit}, user_keys={list(user_data.keys())[:15]}')
-        else:
-            logger.info(f'HWID devices for {rw_uuid}: {len(devices)} found')
-
+        devices = asyncio.run(_fetch_hwid())
         return jsonify(devices)
     except Exception as e:
         logger.warning(f'Failed to fetch HWID devices for {rw_uuid}: {e}')
@@ -2041,7 +2018,17 @@ def delete_user_remnawave_device(user_id: int, hwid_uuid: str):
         import asyncio
         async def _delete():
             async with api as a:
-                return await a._make_request('DELETE', f'/api/users/{rw_uuid}/hwid/{hwid_uuid}')
+                # Получаем числовой id пользователя в Remnawave
+                user_resp = await a._make_request('GET', f'/api/users/{rw_uuid}')
+                user_data = user_resp.get('response', user_resp) if isinstance(user_resp, dict) else {}
+                rw_numeric_id = user_data.get('id') if isinstance(user_data, dict) else None
+                if not rw_numeric_id:
+                    raise ValueError(f'Cannot get numeric id for {rw_uuid}')
+                # POST /api/hwid/devices/delete
+                return await a._make_request('POST', '/api/hwid/devices/delete', {
+                    'userId': int(rw_numeric_id),
+                    'hwid': hwid_uuid,
+                })
         asyncio.run(_delete())
         return jsonify({'success': True})
     except Exception as e:
@@ -3112,6 +3099,10 @@ def get_system_settings():
         'trial_tariff_id': database.get_system_setting('trial_tariff_id') or '',
         'trial_devices_limit': int(database.get_system_setting('trial_devices_limit') or 1),
         'paid_devices_limit': int(database.get_system_setting('paid_devices_limit') or 2),
+        'family_devices_limit': int(database.get_system_setting('family_devices_limit') or 5),
+        'trial_traffic_gb': int(database.get_system_setting('trial_traffic_gb') or 10),
+        'paid_traffic_gb': int(database.get_system_setting('paid_traffic_gb') or 10240),
+        'family_traffic_gb': int(database.get_system_setting('family_traffic_gb') or 10240),
     }
     return jsonify(settings)
 
@@ -3121,7 +3112,7 @@ def get_system_settings():
 def update_system_settings():
     """Обновить системные настройки."""
     data = request.json or {}
-    allowed = ('trial_tariff_id', 'trial_devices_limit', 'paid_devices_limit')
+    allowed = ('trial_tariff_id', 'trial_devices_limit', 'paid_devices_limit', 'family_devices_limit', 'trial_traffic_gb', 'paid_traffic_gb', 'family_traffic_gb')
     for key in allowed:
         if key in data:
             database.set_system_setting(key, str(data[key]))
