@@ -76,6 +76,7 @@ class TBankAPI:
             return {'ok': False, 'error': 'T-Bank is not configured'}
         url = f'{self.api_url}/v2/{method}'
         body = self._signed(payload)
+        logger.info('TBank %s request body: %s', method, json.dumps(body, ensure_ascii=False))
         try:
             response = requests.post(url, json=body, timeout=timeout, headers={
                 'Content-Type': 'application/json',
