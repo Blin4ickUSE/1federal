@@ -239,17 +239,17 @@ async def subscription_notifications_task():
             logger.error(f'Error in subscription_notifications_task: {e}')
             await asyncio.sleep(60)
 
-async def cloudpayments_recurring_task():
-    """Автосписания CloudPayments + ретраи 30м/1ч/2ч/12ч/24ч."""
+async def tbank_recurring_task():
+    """Автосписания Т‑Банк + ретраи по расписанию."""
     while True:
         try:
             await asyncio.sleep(60)
             from src.api import recurring as recurring_billing
             n = await asyncio.to_thread(recurring_billing.process_due_charges, 50)
             if n:
-                logger.info('CloudPayments recurring: processed %s due charges', n)
+                logger.info('T-Bank recurring: processed %s due charges', n)
         except Exception as e:
-            logger.error(f'Error in cloudpayments_recurring_task: {e}')
+            logger.error(f'Error in tbank_recurring_task: {e}')
             await asyncio.sleep(30)
 
 async def auto_renewal_task():
@@ -367,8 +367,8 @@ async def main():
     asyncio.create_task(auto_refund_expired_withdrawals())
     asyncio.create_task(subscription_notifications_task())
     asyncio.create_task(weekly_reminder_task())
-    asyncio.create_task(cloudpayments_recurring_task())
-    # Балансное автопродление отключено — используется CloudPayments
+    asyncio.create_task(tbank_recurring_task())
+    # Балансное автопродление отключено — используется Т‑Банк эквайринг
     logger.info('Бот запущен...')
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

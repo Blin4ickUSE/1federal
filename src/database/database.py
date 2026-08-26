@@ -3,11 +3,14 @@ import os
 import logging
 import hmac
 import secrets
+import json
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 import hashlib
 logger = logging.getLogger(__name__)
 DB_PATH = os.getenv('DB_PATH', 'data.db')
+PANEL_ADMIN_TABS = ['dashboard', 'finance', 'stats', 'users', 'mailing', 'promocodes', 'squads', 'settings', 'roles']
+PANEL_PERM_LEVELS = ('none', 'view', 'edit')
 
 def get_db_connection():
     db_dir = os.path.dirname(os.path.abspath(DB_PATH))
@@ -301,14 +304,31 @@ def init_database():
         cursor.execute('SELECT COUNT(*) FROM whitelist_settings')
         if cursor.fetchone()[0] == 0:
             cursor.execute("\n                INSERT INTO whitelist_settings (subscription_fee, price_per_gb, min_gb, max_gb, pricing_type)\n                VALUES (299.0, 15.0, 100, 500, 'fixed')\n            ")
-        for page_type in ['offer', 'privacy']:
-            cursor.execute('SELECT COUNT(*) FROM public_pages WHERE page_type = ?', (page_type,))
-            if cursor.fetchone()[0] == 0:
-                cursor.execute("INSERT INTO public_pages (page_type, content) VALUES (?, '')", (page_type,))
-        for method in ['cloudpayments', 'crypto']:
+        for method in ['tbank', 'crypto']:
             cursor.execute('SELECT COUNT(*) FROM payment_fees WHERE payment_method = ?', (method,))
             if cursor.fetchone()[0] == 0:
                 cursor.execute('INSERT INTO payment_fees (payment_method) VALUES (?)', (method,))
+        for page_type in ['offer', 'privacy', 'contacts', 'returns']:
+            cursor.execute('SELECT COUNT(*) FROM public_pages WHERE page_type = ?', (page_type,))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("INSERT INTO public_pages (page_type, content) VALUES (?, '')", (page_type,))
+        # Panel admin RBAC columns
+        for col_sql in (
+            "ALTER TABLE panel_admins ADD COLUMN telegram_id INTEGER",
+            "ALTER TABLE panel_admins ADD COLUMN is_superadmin INTEGER DEFAULT 0",
+            "ALTER TABLE panel_admins ADD COLUMN permissions TEXT DEFAULT '{}'",
+        ):
+            try:
+                cursor.execute(col_sql)
+            except Exception:
+                pass
+        # Ensure default admin is superadmin
+        try:
+            cursor.execute(
+                "UPDATE panel_admins SET is_superadmin = 1 WHERE username = 'admin' AND (is_superadmin IS NULL OR is_superadmin = 0)"
+            )
+        except Exception:
+            pass
         conn.commit()
         logger.info('Database initialized')
     except Exception as e:
@@ -1417,14 +1437,59 @@ def set_subscription_squads(subscription_type: str, squad_uuids: List[str]) -> b
     finally:
         conn.close()
 
+def _parse_admin_permissions(raw) -> Dict[str, str]:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    try:
+        data = json.loads(raw) if raw else {}
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+def _normalize_permissions(permissions: dict=None) -> Dict[str, str]:
+    src = permissions if isinstance(permissions, dict) else {}
+    out: Dict[str, str] = {}
+    for tab in PANEL_ADMIN_TABS:
+        val = src.get(tab, 'none')
+        if val not in PANEL_PERM_LEVELS:
+            val = 'none'
+        out[tab] = val
+    return out
+
+def _admin_public_dict(row) -> Dict[str, Any]:
+    d = dict(row)
+    d.pop('password_hash', None)
+    d['is_superadmin'] = bool(d.get('is_superadmin'))
+    d['is_active'] = bool(d.get('is_active')) if d.get('is_active') is not None else True
+    d['permissions'] = _parse_admin_permissions(d.get('permissions'))
+    return d
+
+def _count_active_superadmins(cursor, exclude_id: int=None) -> int:
+    if exclude_id is not None:
+        cursor.execute(
+            'SELECT COUNT(*) AS cnt FROM panel_admins WHERE is_active = 1 AND is_superadmin = 1 AND id != ?',
+            (exclude_id,),
+        )
+    else:
+        cursor.execute('SELECT COUNT(*) AS cnt FROM panel_admins WHERE is_active = 1 AND is_superadmin = 1')
+    row = cursor.fetchone()
+    return int(row['cnt'] or 0)
+
 def create_panel_admin(username: str, password: str) -> Optional[int]:
-    import secrets
     salt = secrets.token_hex(16)
     password_hash = hashlib.sha256(f'{salt}:{password}'.encode()).hexdigest()
+    is_sa = 1 if username == 'admin' else 0
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('INSERT INTO panel_admins (username, password_hash) VALUES (?, ?)', (username, f'{salt}:{password_hash}'))
+        cursor.execute(
+            'INSERT INTO panel_admins (username, password_hash, is_superadmin, permissions) VALUES (?, ?, ?, ?)',
+            (username, f'{salt}:{password_hash}', is_sa, '{}'),
+        )
         conn.commit()
         return cursor.lastrowid
     except sqlite3.IntegrityError:
@@ -1436,7 +1501,10 @@ def verify_panel_admin(username: str, password: str) -> Optional[Dict[str, Any]]
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('SELECT id, username, password_hash, is_active FROM panel_admins WHERE username = ? AND is_active = 1', (username,))
+        cursor.execute(
+            'SELECT id, username, password_hash, is_active, telegram_id, is_superadmin, permissions FROM panel_admins WHERE username = ? AND is_active = 1',
+            (username,),
+        )
         row = cursor.fetchone()
         if not row:
             return None
@@ -1446,12 +1514,17 @@ def verify_panel_admin(username: str, password: str) -> Optional[Dict[str, Any]]
             return None
         cursor.execute('UPDATE panel_admins SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (row['id'],))
         conn.commit()
-        return {'id': row['id'], 'username': row['username']}
+        return {
+            'id': row['id'],
+            'username': row['username'],
+            'telegram_id': row['telegram_id'],
+            'is_superadmin': bool(row['is_superadmin']),
+            'permissions': _parse_admin_permissions(row['permissions']),
+        }
     finally:
         conn.close()
 
 def create_panel_session(admin_id: int) -> Optional[str]:
-    import secrets
     token = secrets.token_urlsafe(32)
     expires = datetime.now() + timedelta(days=7)
     conn = get_db_connection()
@@ -1470,11 +1543,179 @@ def verify_panel_session(session_token: str) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('\n            SELECT ps.*, pa.username FROM panel_sessions ps\n            JOIN panel_admins pa ON ps.admin_id = pa.id\n            WHERE ps.session_token = ? AND ps.expires_at > CURRENT_TIMESTAMP AND pa.is_active = 1\n        ', (session_token,))
+        cursor.execute(
+            """
+            SELECT ps.*, pa.username, pa.telegram_id, pa.is_superadmin, pa.permissions
+            FROM panel_sessions ps
+            JOIN panel_admins pa ON ps.admin_id = pa.id
+            WHERE ps.session_token = ? AND ps.expires_at > CURRENT_TIMESTAMP AND pa.is_active = 1
+            """,
+            (session_token,),
+        )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        data = dict(row)
+        data['is_superadmin'] = bool(data.get('is_superadmin'))
+        data['permissions'] = _parse_admin_permissions(data.get('permissions'))
+        return data
     finally:
         conn.close()
+
+def list_panel_admins() -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT id, username, telegram_id, is_superadmin, is_active, permissions, last_login, created_at
+            FROM panel_admins
+            ORDER BY is_superadmin DESC, id ASC
+            """
+        )
+        return [_admin_public_dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+def get_panel_admin(admin_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT id, username, telegram_id, is_superadmin, is_active, permissions, last_login, created_at
+            FROM panel_admins WHERE id = ?
+            """,
+            (admin_id,),
+        )
+        row = cursor.fetchone()
+        return _admin_public_dict(row) if row else None
+    finally:
+        conn.close()
+
+def create_panel_admin_full(
+    username: str,
+    password: str,
+    telegram_id: int,
+    permissions: dict,
+    is_superadmin: bool=False,
+) -> Optional[int]:
+    salt = secrets.token_hex(16)
+    password_hash = hashlib.sha256(f'{salt}:{password}'.encode()).hexdigest()
+    perms = _normalize_permissions(permissions)
+    is_sa = 1 if (is_superadmin or username == 'admin') else 0
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO panel_admins (username, password_hash, telegram_id, is_superadmin, permissions)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (username, f'{salt}:{password_hash}', int(telegram_id), is_sa, json.dumps(perms, ensure_ascii=False)),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
+
+def update_panel_admin(
+    admin_id: int,
+    *,
+    username: str=None,
+    password: str=None,
+    telegram_id=None,
+    permissions: dict=None,
+    is_active: bool=None,
+    is_superadmin: bool=None,
+) -> Tuple[bool, str]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM panel_admins WHERE id = ?', (admin_id,))
+        row = cursor.fetchone()
+        if not row:
+            return (False, 'Admin not found')
+        current = dict(row)
+        new_is_sa = current.get('is_superadmin')
+        if is_superadmin is not None:
+            new_is_sa = 1 if is_superadmin else 0
+        new_is_active = current.get('is_active')
+        if is_active is not None:
+            new_is_active = 1 if is_active else 0
+        demoting = bool(current.get('is_superadmin')) and not bool(new_is_sa)
+        deactivating_sa = bool(current.get('is_superadmin')) and bool(current.get('is_active')) and not bool(new_is_active)
+        if demoting or deactivating_sa:
+            others = _count_active_superadmins(cursor, exclude_id=admin_id)
+            if others < 1:
+                return (False, 'Cannot demote or deactivate the last superadmin')
+        updates = []
+        values = []
+        if username is not None:
+            updates.append('username = ?')
+            values.append(username)
+            if username == 'admin':
+                new_is_sa = 1
+        if password is not None:
+            salt = secrets.token_hex(16)
+            password_hash = hashlib.sha256(f'{salt}:{password}'.encode()).hexdigest()
+            updates.append('password_hash = ?')
+            values.append(f'{salt}:{password_hash}')
+        if telegram_id is not None:
+            updates.append('telegram_id = ?')
+            values.append(int(telegram_id) if telegram_id != '' else None)
+        if permissions is not None:
+            updates.append('permissions = ?')
+            values.append(json.dumps(_normalize_permissions(permissions), ensure_ascii=False))
+        if is_active is not None:
+            updates.append('is_active = ?')
+            values.append(1 if is_active else 0)
+        if is_superadmin is not None or (username is not None and username == 'admin'):
+            updates.append('is_superadmin = ?')
+            values.append(1 if new_is_sa else 0)
+        if not updates:
+            return (True, '')
+        updates.append('updated_at = CURRENT_TIMESTAMP')
+        values.append(admin_id)
+        try:
+            cursor.execute(f"UPDATE panel_admins SET {', '.join(updates)} WHERE id = ?", values)
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return (False, 'Username already exists')
+        return (True, '')
+    finally:
+        conn.close()
+
+def delete_panel_admin(admin_id: int) -> Tuple[bool, str]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id, is_superadmin, is_active FROM panel_admins WHERE id = ?', (admin_id,))
+        row = cursor.fetchone()
+        if not row:
+            return (False, 'Admin not found')
+        if row['is_superadmin'] and row['is_active']:
+            others = _count_active_superadmins(cursor, exclude_id=admin_id)
+            if others < 1:
+                return (False, 'Cannot delete the last superadmin')
+        cursor.execute(
+            'UPDATE panel_admins SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            (admin_id,),
+        )
+        cursor.execute('DELETE FROM panel_sessions WHERE admin_id = ?', (admin_id,))
+        conn.commit()
+        return (True, '')
+    finally:
+        conn.close()
+
+def get_admin_effective_permissions(admin: dict) -> Dict[str, str]:
+    if not admin:
+        return {tab: 'none' for tab in PANEL_ADMIN_TABS}
+    if admin.get('is_superadmin') or admin.get('username') == 'admin':
+        return {tab: 'edit' for tab in PANEL_ADMIN_TABS}
+    return _normalize_permissions(admin.get('permissions'))
 
 def delete_panel_session(session_token: str) -> bool:
     conn = get_db_connection()
@@ -1725,13 +1966,18 @@ def transfer_user_assets(from_user_id: int, to_user_id: int) -> None:
         conn.close()
 
 def get_or_create_default_admin() -> Dict[str, str]:
-    import secrets
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT id, username FROM panel_admins WHERE is_active = 1 LIMIT 1')
         row = cursor.fetchone()
         if row:
+            if row['username'] == 'admin':
+                cursor.execute(
+                    'UPDATE panel_admins SET is_superadmin = 1 WHERE id = ? AND (is_superadmin IS NULL OR is_superadmin = 0)',
+                    (row['id'],),
+                )
+                conn.commit()
             return {'username': row['username'], 'password': None, 'exists': True}
         username = 'admin'
         password = secrets.token_urlsafe(12)
@@ -1743,7 +1989,6 @@ def get_or_create_default_admin() -> Dict[str, str]:
         conn.close()
 
 def update_admin_password(admin_id: int, new_password: str) -> bool:
-    import secrets
     salt = secrets.token_hex(16)
     password_hash = hashlib.sha256(f'{salt}:{new_password}'.encode()).hexdigest()
     conn = get_db_connection()

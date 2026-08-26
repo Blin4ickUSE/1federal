@@ -219,6 +219,14 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
+    location /tbank {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
     location /cloudpayments {
         proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host \$host;
@@ -293,9 +301,12 @@ TELEGRAM_ADMIN_ID=${TELEGRAM_ADMIN_ID}
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
 
-CLOUDPAYMENTS_PUBLIC_ID=
-CLOUDPAYMENTS_API_SECRET=
-CLOUDPAYMENTS_API_URL=https://api.cloudpayments.ru
+TBANK_TERMINAL_KEY=
+TBANK_PASSWORD=
+TBANK_API_URL=https://securepay.tinkoff.ru
+TBANK_NOTIFICATION_URL=https://${domain}${port_suffix}/tbank
+TBANK_TAXATION=
+TBANK_VAT=none
 
 PANEL_SECRET=${PANEL_SECRET}
 
@@ -324,7 +335,7 @@ SMTP_PORT=25
 EOF
 
     log_success "✔ Файл .env создан."
-    log_warn "\n⚠️  CloudPayments настраивается в панели управления:"
+    log_warn "\n⚠️  Т‑Банк эквайринг настраивается в панели управления:"
     log_warn "   https://${panel_domain}${port_suffix}"
     log_info "\nПочта (OTP): письма уходят с no-reply@${domain}"
     if [[ -n "$server_ip" ]]; then
@@ -538,7 +549,7 @@ ${BOLD}Веб‑панель:${NC}
   ${YELLOW}https://${PANEL_DOMAIN}${PORT_SUFFIX}${NC}
 
 ${BOLD}Webhooks:${NC}
-  CloudPayments:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/cloudpayments${NC}
+  Т‑Банк:  ${YELLOW}https://${DOMAIN}${PORT_SUFFIX}/tbank${NC}
 
 ${BOLD}Почта (OTP):${NC}
   From: no-reply@${DOMAIN}

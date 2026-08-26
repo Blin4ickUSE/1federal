@@ -6,14 +6,14 @@ import secrets
 import json
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, unquote
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import sys
 import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from src.database import database
 from src.core import core, abuse_detected
-from src.api import remnawave, cloudpayments
+from src.api import remnawave, tbank
 from src.api import recurring as recurring_billing
 from src.api import account_link
 from src.api import email_auth as email_auth_routes
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 ENV_KEYS_MANAGED = {
     'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID', 'TELEGRAM_ADMIN_IDS',
     'REMWAVE_PANEL_URL', 'REMWAVE_API_KEY',
-    'CLOUDPAYMENTS_PUBLIC_ID', 'CLOUDPAYMENTS_API_SECRET', 'CLOUDPAYMENTS_API_URL',
+    'TBANK_TERMINAL_KEY', 'TBANK_PASSWORD', 'TBANK_API_URL', 'TBANK_NOTIFICATION_URL',
+    'TBANK_TAXATION', 'TBANK_VAT',
     'TRIAL_HOURS',
 }
 
@@ -102,6 +103,95 @@ def format_datetime_msk(dt: datetime=None) -> str:
     return dt.strftime('%Y-%m-%dT%H:%M:%S')
 PANEL_SECRET = os.getenv('PANEL_SECRET', '')
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('BOT_TOKEN', '')
+PANEL_TABS = ['dashboard', 'finance', 'stats', 'users', 'mailing', 'promocodes', 'squads', 'settings', 'roles']
+ACL_PREFIXES = [
+    ('/api/panel/admins', 'roles'),
+    ('/api/panel/auth/change-password', None),
+    ('/api/panel/transactions', 'finance'),
+    ('/api/panel/finance', 'finance'),
+    ('/api/panel/developer-share', 'finance'),
+    ('/api/panel/stats', 'stats'),
+    ('/api/panel/statistics', 'stats'),
+    ('/api/panel/users', 'users'),
+    ('/api/panel/keys', 'users'),
+    ('/api/panel/issue-key', 'users'),
+    ('/api/panel/mailing', 'mailing'),
+    ('/api/panel/promocodes', 'promocodes'),
+    ('/api/panel/squads', 'squads'),
+    ('/api/panel/remnawave', 'squads'),
+    ('/api/panel/default-squads', 'squads'),
+    ('/api/panel/tariffs', 'settings'),
+    ('/api/panel/system-settings', 'settings'),
+    ('/api/panel/backups', 'settings'),
+    ('/api/panel/payment-settings', 'settings'),
+    ('/api/panel/payment-fees', 'settings'),
+    ('/api/panel/public-pages', 'settings'),
+    ('/api/panel/auto-discounts', 'settings'),
+    ('/api/panel/settings', 'settings'),
+    ('/api/panel/diagnostics', 'settings'),
+    ('/api/panel/tools', 'settings'),
+    ('/api/panel/export', 'settings'),
+]
+_PERM_RANK = {'none': 0, 'view': 1, 'edit': 2}
+
+def _panel_admin_from_session(session: dict) -> dict:
+    return {
+        'id': session.get('admin_id'),
+        'username': session.get('username'),
+        'telegram_id': session.get('telegram_id'),
+        'is_superadmin': bool(session.get('is_superadmin')),
+        'permissions': session.get('permissions') or {},
+    }
+
+def _legacy_superadmin() -> dict:
+    return {
+        'id': None,
+        'username': 'legacy',
+        'telegram_id': None,
+        'is_superadmin': True,
+        'permissions': {tab: 'edit' for tab in PANEL_TABS},
+    }
+
+def _perm_at_least(effective: dict, tab: str, needed: str) -> bool:
+    return _PERM_RANK.get(effective.get(tab, 'none'), 0) >= _PERM_RANK.get(needed, 0)
+
+def _acl_required_tab(path: str):
+    """Return tab name, None (auth-only self endpoint), or '__none__' if no ACL rule."""
+    best = None
+    best_len = -1
+    for prefix, tab in ACL_PREFIXES:
+        if path == prefix or path.startswith(prefix + '/'):
+            if len(prefix) > best_len:
+                best = tab
+                best_len = len(prefix)
+    if best_len < 0:
+        return '__none__'
+    return best
+
+def _validate_panel_permissions(permissions) -> tuple[dict | None, str | None]:
+    if permissions is None:
+        return ({tab: 'none' for tab in PANEL_TABS}, None)
+    if not isinstance(permissions, dict):
+        return (None, 'permissions must be an object')
+    out = {}
+    for key, val in permissions.items():
+        if key not in PANEL_TABS:
+            return (None, f'Unknown permission tab: {key}')
+        if val not in ('none', 'view', 'edit'):
+            return (None, f'Invalid permission level for {key}')
+        out[key] = val
+    for tab in PANEL_TABS:
+        out.setdefault(tab, 'none')
+    return (out, None)
+
+def _parse_telegram_id(value):
+    if value is None or value == '':
+        return (None, 'telegram_id is required')
+    try:
+        tid = int(value)
+    except (TypeError, ValueError):
+        return (None, 'telegram_id must be an integer')
+    return (tid, None)
 
 def verify_telegram_webapp_data(init_data: str) -> dict | None:
     if not init_data or not BOT_TOKEN:
@@ -247,12 +337,35 @@ def require_auth(f):
         if not auth_header.startswith('Bearer '):
             return (jsonify({'error': 'Invalid authorization format'}), 401)
         token = auth_header[7:]
+        path = request.path or ''
+        method = (request.method or 'GET').upper()
+        needed = 'edit' if method in ('POST', 'PUT', 'PATCH', 'DELETE') else 'view'
+
         if token == PANEL_SECRET:
+            g.panel_session = {'method': 'legacy'}
+            g.panel_admin = _legacy_superadmin()
             return f(*args, **kwargs)
+
         session = database.verify_panel_session(token)
-        if session:
+        if not session:
+            return (jsonify({'error': 'Unauthorized'}), 401)
+
+        admin = _panel_admin_from_session(session)
+        g.panel_session = session
+        g.panel_admin = admin
+        effective = database.get_admin_effective_permissions(admin)
+
+        if path == '/api/panel/stats/summary' or path.startswith('/api/panel/stats/summary/'):
+            if any(_perm_at_least(effective, t, 'view') for t in ('dashboard', 'finance', 'stats')):
+                return f(*args, **kwargs)
+            return (jsonify({'error': 'Forbidden'}), 403)
+
+        tab = _acl_required_tab(path)
+        if tab == '__none__' or tab is None:
             return f(*args, **kwargs)
-        return (jsonify({'error': 'Unauthorized'}), 401)
+        if not _perm_at_least(effective, tab, needed):
+            return (jsonify({'error': 'Forbidden'}), 403)
+        return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
 
@@ -615,7 +728,7 @@ def create_payment(_user=None):
     data = request.json or {}
     user_id = _user['id']
     amount = data.get('amount')
-    method = data.get('method') or 'cloudpayments'
+    method = data.get('method') or 'tbank'
     if amount is None:
         return (jsonify({'error': 'Missing required fields'}), 400)
     try:
@@ -627,8 +740,8 @@ def create_payment(_user=None):
 
     user = _user
 
-    if not cloudpayments.cloudpayments_api.is_configured:
-        return (jsonify({'error': 'CloudPayments не настроен'}), 503)
+    if not tbank.tbank_api.is_configured:
+        return (jsonify({'error': 'Т‑Банк эквайринг не настроен'}), 503)
 
     days = int(data.get('days') or 0)
     is_trial = bool(data.get('is_trial'))
@@ -652,7 +765,6 @@ def create_payment(_user=None):
     if days <= 0 and not is_trial:
         return (jsonify({'error': 'Укажите срок подписки'}), 400)
 
-    # Все платные тарифы — счёт CloudPayments (оплата на orders.cloudpayments.ru)
     invoice_id = f'inv_{uuid_lib.uuid4().hex[:20]}'
     description = (
         '1FEDERAL VPN — пробный период 7 дней за 10₽'
@@ -678,37 +790,42 @@ def create_payment(_user=None):
     miniapp_url = (os.getenv('MINIAPP_URL') or '').rstrip('/')
     success_url = f'{miniapp_url}/?paid=1' if miniapp_url else None
     fail_url = f'{miniapp_url}/?paid=0' if miniapp_url else None
+    webhook_base = (os.getenv('WEBHOOK_URL') or miniapp_url or '').rstrip('/')
+    notification_url = f'{webhook_base}/tbank' if webhook_base else None
 
-    order = cloudpayments.cloudpayments_api.create_order(
+    order = tbank.tbank_api.init_payment(
         amount=amount,
-        account_id=str(user_id),
-        invoice_id=invoice_id,
+        order_id=invoice_id[:36],
         description=description,
+        customer_key=str(user_id),
         success_url=success_url,
         fail_url=fail_url,
-        json_data={
+        notification_url=notification_url,
+        email=user.get('email'),
+        recurrent=True,
+        data={
             'user_id': int(user_id),
             'invoice_id': invoice_id,
-            'is_trial': is_trial,
+            'is_trial': int(bool(is_trial)),
             'days': days,
         },
     )
     if not order.get('ok'):
         return (jsonify({
-            'error': order.get('error') or 'CloudPayments order failed',
-            'provider': 'cloudpayments',
+            'error': order.get('error') or 'T-Bank Init failed',
+            'provider': 'tbank',
             'details': order.get('response'),
         }), 400)
 
     return jsonify({
         'payment_id': invoice_id,
         'invoice_id': invoice_id,
-        'order_id': order.get('order_id'),
+        'order_id': order.get('payment_id'),
         'payment_url': order.get('payment_url'),
         'status': 'pending',
         'amount': amount,
         'recurring': True,
-        'provider': 'cloudpayments',
+        'provider': 'tbank',
         'method': method,
     })
 
@@ -717,9 +834,9 @@ def create_payment(_user=None):
 
 def payment_config():
     return jsonify({
-        'provider': 'cloudpayments',
-        'configured': cloudpayments.cloudpayments_api.is_configured,
-        'public_id': cloudpayments.cloudpayments_api.public_id if cloudpayments.cloudpayments_api.is_configured else '',
+        'provider': 'tbank',
+        'configured': tbank.tbank_api.is_configured,
+        'terminal_key': tbank.tbank_api.terminal_key if tbank.tbank_api.is_configured else '',
     })
 
 
@@ -1547,15 +1664,22 @@ def refund_transaction(transaction_id: int):
         payment_provider = (transaction['payment_provider'] or '').strip()
         refund_result = None
 
-        # Real money back via CloudPayments when we have TransactionId
-        is_cp = payment_provider.lower() in ('cloudpayments', 'cp', '') or 'cloud' in payment_provider.lower()
-        if payment_id and payment_id.isdigit() and (is_cp or not payment_provider or payment_provider.lower() == 'cloudpayments'):
-            refund_result = cloudpayments.cloudpayments_api.refund_payment(transaction_id=payment_id, amount=amount)
+        # Real money back via T-Bank when we have PaymentId
+        provider_l = payment_provider.lower()
+        is_tbank = provider_l in ('tbank', 'tinkoff', 'тбанк', '') or 'tbank' in provider_l or 'tinkoff' in provider_l
+        is_legacy_cp = 'cloud' in provider_l
+        if payment_id and is_tbank and not is_legacy_cp:
+            refund_result = tbank.tbank_api.cancel_payment(payment_id=payment_id, amount=amount)
             if not refund_result.get('ok'):
                 return (jsonify({
                     'success': False,
-                    'error': refund_result.get('reason') or refund_result.get('error') or 'CloudPayments отказал в возврате',
+                    'error': refund_result.get('reason') or refund_result.get('error') or 'Т‑Банк отказал в возврате',
                 }), 502)
+        elif payment_id and is_legacy_cp:
+            return (jsonify({
+                'success': False,
+                'error': 'Эта оплата была через CloudPayments — возврат через старый провайдер недоступен',
+            }), 400)
 
         user = database.get_user_by_id(user_id)
         # Нет системы баланса — при возврате просто помечаем транзакцию
@@ -3449,10 +3573,20 @@ def get_payment_settings():
             if provider not in settings:
                 settings[provider] = {}
             settings[provider][row['setting_key']] = row['setting_value']
-        providers = ['cloudpayments']
+        providers = ['tbank']
         for p in providers:
             if p not in settings:
                 settings[p] = {'enabled': '0'}
+        # Expose current env (without password) for UI
+        settings.setdefault('tbank', {})
+        settings['tbank']['terminal_key'] = settings['tbank'].get('terminal_key') or (os.getenv('TBANK_TERMINAL_KEY') or '')
+        settings['tbank']['api_url'] = settings['tbank'].get('api_url') or (os.getenv('TBANK_API_URL') or 'https://securepay.tinkoff.ru')
+        settings['tbank']['configured'] = '1' if tbank.tbank_api.is_configured else '0'
+        settings['tbank']['has_password'] = '1' if bool(os.getenv('TBANK_PASSWORD')) else '0'
+        settings['tbank']['taxation'] = settings['tbank'].get('taxation') or (os.getenv('TBANK_TAXATION') or '')
+        settings['tbank']['vat'] = settings['tbank'].get('vat') or (os.getenv('TBANK_VAT') or '')
+        webhook_base = (os.getenv('WEBHOOK_URL') or os.getenv('MINIAPP_URL') or '').rstrip('/')
+        settings['tbank']['notification_url_hint'] = f'{webhook_base}/tbank' if webhook_base else ''
         return jsonify(settings)
     finally:
         conn.close()
@@ -3469,22 +3603,32 @@ def update_payment_settings(provider: str):
         for key, value in data.items():
             cursor.execute('\n                INSERT OR REPLACE INTO payment_provider_settings (provider, setting_key, setting_value, updated_at)\n                VALUES (?, ?, ?, CURRENT_TIMESTAMP)\n            ', (provider, key, str(value)))
         conn.commit()
-        if provider == 'cloudpayments':
+        if provider == 'tbank':
             env_updates = {}
-            if 'public_id' in data:
-                os.environ['CLOUDPAYMENTS_PUBLIC_ID'] = str(data['public_id'])
-                env_updates['CLOUDPAYMENTS_PUBLIC_ID'] = str(data['public_id'])
-            if 'api_secret' in data or 'secret_key' in data:
-                secret = str(data.get('api_secret') or data.get('secret_key') or '')
-                os.environ['CLOUDPAYMENTS_API_SECRET'] = secret
-                env_updates['CLOUDPAYMENTS_API_SECRET'] = secret
+            if 'terminal_key' in data:
+                os.environ['TBANK_TERMINAL_KEY'] = str(data['terminal_key'])
+                env_updates['TBANK_TERMINAL_KEY'] = str(data['terminal_key'])
+            if 'password' in data or 'api_password' in data or 'secret_key' in data:
+                secret = str(data.get('password') or data.get('api_password') or data.get('secret_key') or '')
+                if secret:
+                    os.environ['TBANK_PASSWORD'] = secret
+                    env_updates['TBANK_PASSWORD'] = secret
             if 'api_url' in data:
-                os.environ['CLOUDPAYMENTS_API_URL'] = str(data['api_url'])
-                env_updates['CLOUDPAYMENTS_API_URL'] = str(data['api_url'])
+                os.environ['TBANK_API_URL'] = str(data['api_url'])
+                env_updates['TBANK_API_URL'] = str(data['api_url'])
+            if 'notification_url' in data:
+                os.environ['TBANK_NOTIFICATION_URL'] = str(data['notification_url'])
+                env_updates['TBANK_NOTIFICATION_URL'] = str(data['notification_url'])
+            if 'taxation' in data:
+                os.environ['TBANK_TAXATION'] = str(data['taxation'])
+                env_updates['TBANK_TAXATION'] = str(data['taxation'])
+            if 'vat' in data:
+                os.environ['TBANK_VAT'] = str(data['vat'])
+                env_updates['TBANK_VAT'] = str(data['vat'])
             if env_updates:
                 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
                 _save_env_map(env_path, env_updates)
-            cloudpayments.cloudpayments_api.reload_from_env()
+            tbank.tbank_api.reload_from_env()
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f'Error updating payment settings for {provider}: {e}')
@@ -3869,10 +4013,23 @@ def panel_login():
     admin = database.verify_panel_admin(username, password)
     if not admin:
         return (jsonify({'error': 'Invalid credentials'}), 401)
-    admin_ids = _parse_admin_ids()
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
-    if not admin_ids or not bot_token:
-        return (jsonify({'error': '2FA not configured: set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_IDS'}), 500)
+    if not bot_token:
+        return (jsonify({'error': '2FA not configured: set TELEGRAM_BOT_TOKEN'}), 500)
+    recipients = []
+    if admin.get('telegram_id'):
+        try:
+            recipients = [int(admin['telegram_id'])]
+        except (TypeError, ValueError):
+            recipients = []
+    elif admin.get('is_superadmin') or admin.get('username') == 'admin':
+        recipients = _parse_admin_ids()
+        if not recipients:
+            return (jsonify({'error': '2FA not configured: set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_IDS'}), 500)
+    else:
+        return (jsonify({'error': 'У админа не указан Telegram ID'}), 400)
+    if not recipients:
+        return (jsonify({'error': 'У админа не указан Telegram ID'}), 400)
     code = ''.join((secrets.choice('0123456789') for _ in range(6)))
     code_hash = hashlib.sha256(code.encode()).hexdigest()
     ip = _get_client_ip()
@@ -3889,8 +4046,8 @@ def panel_login():
         conn.close()
     message = f"🔐 <b>Подтверждение входа в панель</b>\n\nКод: <code>{code}</code>\nIP: <code>{ip or 'unknown'}</code>\nUser-Agent: <code>{user_agent or 'unknown'}</code>\nВремя: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\nСрок действия: 5 минут"
     sent_any = False
-    for admin_id in admin_ids:
-        sent_any = bool(_telegram_api(bot_token, 'sendMessage', {'chat_id': admin_id, 'text': message, 'parse_mode': 'HTML'})) or sent_any
+    for chat_id in recipients:
+        sent_any = bool(_telegram_api(bot_token, 'sendMessage', {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'})) or sent_any
     if not sent_any:
         return (jsonify({'error': 'Failed to deliver 2FA code to admins'}), 500)
     return jsonify({'success': True, 'requires_otp': True, 'otp_id': otp_id})
@@ -3942,11 +4099,129 @@ def panel_auth_check():
         return (jsonify({'authenticated': False}), 401)
     token = auth_header[7:]
     if token == PANEL_SECRET:
-        return jsonify({'authenticated': True, 'method': 'legacy'})
+        admin = _legacy_superadmin()
+        return jsonify({
+            'authenticated': True,
+            'method': 'legacy',
+            'username': admin['username'],
+            'admin_id': admin.get('id'),
+            'is_superadmin': True,
+            'permissions': admin['permissions'],
+            'tabs': PANEL_TABS,
+        })
     session = database.verify_panel_session(token)
     if session:
-        return jsonify({'authenticated': True, 'method': 'session', 'username': session['username']})
+        admin = _panel_admin_from_session(session)
+        perms = database.get_admin_effective_permissions(admin)
+        return jsonify({
+            'authenticated': True,
+            'method': 'session',
+            'username': admin.get('username'),
+            'admin_id': admin.get('id'),
+            'is_superadmin': bool(admin.get('is_superadmin')),
+            'permissions': perms,
+            'tabs': PANEL_TABS,
+        })
     return (jsonify({'authenticated': False}), 401)
+
+
+@app.route('/api/panel/admins', methods=['GET'])
+
+@require_auth
+
+def panel_list_admins():
+    return jsonify({'admins': database.list_panel_admins()})
+
+
+@app.route('/api/panel/admins', methods=['POST'])
+
+@require_auth
+
+def panel_create_admin():
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    tid, tid_err = _parse_telegram_id(data.get('telegram_id'))
+    if not username:
+        return (jsonify({'error': 'username required'}), 400)
+    if len(password) < 8:
+        return (jsonify({'error': 'Password must be at least 8 characters'}), 400)
+    if tid_err:
+        return (jsonify({'error': tid_err}), 400)
+    perms, perms_err = _validate_panel_permissions(data.get('permissions'))
+    if perms_err:
+        return (jsonify({'error': perms_err}), 400)
+    is_sa = bool(data.get('is_superadmin'))
+    admin_id = database.create_panel_admin_full(
+        username=username,
+        password=password,
+        telegram_id=tid,
+        permissions=perms,
+        is_superadmin=is_sa,
+    )
+    if not admin_id:
+        return (jsonify({'error': 'Username already exists'}), 400)
+    return jsonify({'success': True, 'admin': database.get_panel_admin(admin_id)})
+
+
+@app.route('/api/panel/admins/<int:admin_id>', methods=['PUT'])
+
+@require_auth
+
+def panel_update_admin(admin_id: int):
+    data = request.json or {}
+    kwargs = {}
+    if 'username' in data:
+        kwargs['username'] = (data.get('username') or '').strip()
+    if 'telegram_id' in data:
+        tid, tid_err = _parse_telegram_id(data.get('telegram_id'))
+        if tid_err:
+            return (jsonify({'error': tid_err}), 400)
+        kwargs['telegram_id'] = tid
+    if 'permissions' in data:
+        perms, perms_err = _validate_panel_permissions(data.get('permissions'))
+        if perms_err:
+            return (jsonify({'error': perms_err}), 400)
+        kwargs['permissions'] = perms
+    if 'is_active' in data:
+        kwargs['is_active'] = bool(data.get('is_active'))
+    if 'is_superadmin' in data:
+        kwargs['is_superadmin'] = bool(data.get('is_superadmin'))
+    if 'password' in data and data.get('password'):
+        if len(str(data['password'])) < 8:
+            return (jsonify({'error': 'Password must be at least 8 characters'}), 400)
+        kwargs['password'] = str(data['password'])
+    ok, err = database.update_panel_admin(admin_id, **kwargs)
+    if not ok:
+        return (jsonify({'error': err or 'Update failed'}), 400)
+    return jsonify({'success': True, 'admin': database.get_panel_admin(admin_id)})
+
+
+@app.route('/api/panel/admins/<int:admin_id>', methods=['DELETE'])
+
+@require_auth
+
+def panel_delete_admin(admin_id: int):
+    ok, err = database.delete_panel_admin(admin_id)
+    if not ok:
+        return (jsonify({'error': err or 'Delete failed'}), 400)
+    return jsonify({'success': True})
+
+
+@app.route('/api/panel/admins/<int:admin_id>/password', methods=['POST'])
+
+@require_auth
+
+def panel_set_admin_password(admin_id: int):
+    data = request.json or {}
+    new_password = data.get('password') or data.get('new_password') or ''
+    if len(new_password) < 8:
+        return (jsonify({'error': 'Password must be at least 8 characters'}), 400)
+    ok, err = database.update_panel_admin(admin_id, password=new_password)
+    if not ok:
+        return (jsonify({'error': err or 'Failed to update password'}), 400)
+    return jsonify({'success': True})
+
 
 @app.route('/api/panel/auth/init', methods=['GET'])
 
@@ -3964,16 +4239,26 @@ def panel_auth_init():
 @require_auth
 
 def panel_change_password():
-    auth_header = request.headers.get('Authorization')
-    token = auth_header[7:] if auth_header and auth_header.startswith('Bearer ') else None
-    session = database.verify_panel_session(token) if token else None
-    if not session:
-        return (jsonify({'error': 'Session required for password change'}), 403)
-    data = request.json
-    new_password = data.get('new_password')
+    admin = getattr(g, 'panel_admin', None) or {}
+    data = request.json or {}
+    new_password = data.get('new_password') or data.get('password')
     if not new_password or len(new_password) < 8:
         return (jsonify({'error': 'Password must be at least 8 characters'}), 400)
-    if database.update_admin_password(session['admin_id'], new_password):
+    target_id = data.get('admin_id')
+    if target_id is not None:
+        if not admin.get('is_superadmin'):
+            return (jsonify({'error': 'Forbidden'}), 403)
+        try:
+            target_id = int(target_id)
+        except (TypeError, ValueError):
+            return (jsonify({'error': 'admin_id must be an integer'}), 400)
+        if database.update_admin_password(target_id, new_password):
+            return jsonify({'success': True})
+        return (jsonify({'error': 'Failed to update password'}), 500)
+    own_id = admin.get('id')
+    if own_id is None:
+        return (jsonify({'error': 'Session required for password change'}), 403)
+    if database.update_admin_password(int(own_id), new_password):
         return jsonify({'success': True})
     return (jsonify({'error': 'Failed to update password'}), 500)
 

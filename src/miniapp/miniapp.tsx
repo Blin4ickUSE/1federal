@@ -407,7 +407,7 @@ const PRIVACY_POLICY_TEXT = `
 
 **2.1.2. Данные для оказания услуг:** сведения о выбранном тарифе, история платежей, статус подписки, техническая информация о подключениях к Сервису.
 
-**2.1.3. Платёжные данные:** факт и сумма оплаты, идентификатор транзакции. Полные реквизиты банковской карты Оператором не собираются — их обработка осуществляется исключительно платёжным агентом (ООО «CloudPayments») в соответствии с требованиями PCI DSS.
+**2.1.3. Платёжные данные:** факт и сумма оплаты, идентификатор транзакции. Полные реквизиты банковской карты Оператором не собираются — их обработка осуществляется исключительно платёжным агентом (АО «ТБанк», интернет-эквайринг) в соответствии с требованиями PCI DSS.
 
 **2.1.4. Технические данные:** IP-адрес, данные об устройстве и программном обеспечении, файлы cookie, иные технические сведения, автоматически передаваемые при использовании Сайта.
 
@@ -440,7 +440,7 @@ const PRIVACY_POLICY_TEXT = `
 ### 6. ПЕРЕДАЧА ДАННЫХ ТРЕТЬИМ ЛИЦАМ
 
 **6.1.** Оператор не передаёт персональные данные третьим лицам, за исключением:
-* Платёжных агентов (ООО «CloudPayments») — для обработки платежей.
+* Платёжных агентов (АО «ТБанк», интернет-эквайринг) — для обработки платежей.
 * Хостинг- и серверных провайдеров — для технического обеспечения Сервиса.
 * Государственных органов Российской Федерации — по законному запросу.
 
@@ -475,6 +475,50 @@ const PRIVACY_POLICY_TEXT = `
 **10.2.** Все споры разрешаются в порядке, предусмотренном законодательством Российской Федерации.
 
 Реквизиты: ИП Султанов Мансур Масудович · ОГРНИП 32620000039442 · ИНН 771974193080 · Сервис 1federal · Телеграм-бот @onefederalbot · Сайт app.1federal.one · Поддержка @onefederal_support
+`
+
+const CONTACTS_TEXT = `
+**Контакты сервиса «1federal»**
+
+**Исполнитель:** Индивидуальный предприниматель Султанов Мансур Масудович
+**ОГРНИП:** 32620000039442
+**ИНН:** 771974193080
+
+**Сайт:** https://1federal.one · https://app.1federal.one
+**Telegram-бот:** @onefederalbot
+**Поддержка:** @onefederal_support
+
+**Email:** support@1federal.one
+**Телефон:** через Telegram (@onefederal_support)
+
+**Режим работы поддержки:** Пн–Пт 10:00–19:00 (МСК)
+
+**Адрес:** онлайн-сервис; юридический адрес предоставляется по запросу в поддержку.
+`
+
+const RETURNS_TEXT = `
+**Возврат и обмен**
+
+Сервис «1federal» предоставляет цифровые услуги (доступ к VPN). После выдачи VPN-ключа услуга считается оказанной.
+
+### Когда возможен возврат
+
+* Если VPN-ключ **не выдан в течение 72 часов** с момента подтверждения оплаты — вы вправе потребовать полный возврат (п. 6.2 оферты).
+* После выдачи ключа оплата, как правило, **не подлежит возврату**, независимо от факта использования (п. 6.1 оферты).
+* При расторжении по вине покупателя средства не возвращаются (п. 6.3 оферты).
+
+### Как оформить обращение
+
+1. Напишите в поддержку Telegram: **@onefederal_support**
+2. Укажите: Telegram ID / логин, дату и сумму оплаты, причину обращения.
+3. Приложите скриншот или идентификатор платежа, если есть.
+
+### Сроки
+
+* Рассмотрение обращения — в разумный срок в рабочие часы поддержки (Пн–Пт 10:00–19:00 МСК).
+* При одобрении возврата средства возвращаются в срок **не более 10 рабочих дней** на тот же способ оплаты (через АО «ТБанк»).
+
+Обмен цифровой услуги на иной товар не производится. Подробности — в Договоре оферты (§6).
 `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
@@ -790,9 +834,11 @@ export default function App() {
 
   const [docModalOpen, setDocModalOpen] = useState(false);
   const [docContent, setDocContent] = useState<{ title: string, text: string } | null>(null);
-  const [publicPages, setPublicPages] = useState<{ offer: string, privacy: string }>({
+  const [publicPages, setPublicPages] = useState<{ offer: string; privacy: string; contacts: string; returns: string }>({
     offer: OFFER_AGREEMENT_TEXT,
-    privacy: PRIVACY_POLICY_TEXT
+    privacy: PRIVACY_POLICY_TEXT,
+    contacts: CONTACTS_TEXT,
+    returns: RETURNS_TEXT,
   });
 
   const [currentDevice, setCurrentDevice] = useState<Device | null>(null);
@@ -981,9 +1027,15 @@ export default function App() {
     try {
       const publicPagesData = await miniApiFetch('/public-pages');
       if (publicPagesData) {
+        const pick = (raw: any, fallback: string) => {
+          const c = typeof raw?.content === 'string' ? raw.content.trim() : '';
+          return c || fallback;
+        };
         setPublicPages({
-          offer: publicPagesData.offer?.content || OFFER_AGREEMENT_TEXT,
-          privacy: publicPagesData.privacy?.content || PRIVACY_POLICY_TEXT
+          offer: pick(publicPagesData.offer, OFFER_AGREEMENT_TEXT),
+          privacy: pick(publicPagesData.privacy, PRIVACY_POLICY_TEXT),
+          contacts: pick(publicPagesData.contacts, CONTACTS_TEXT),
+          returns: pick(publicPagesData.returns, RETURNS_TEXT),
         });
       }
     } catch (e) {
@@ -1561,7 +1613,7 @@ export default function App() {
       const body: Record<string, unknown> = {
         user_id: currentUserId,
         amount,
-        method: 'cloudpayments',
+        method: 'tbank',
         days,
         recurring: true,
         is_trial: isTrial,
@@ -1587,7 +1639,7 @@ export default function App() {
       }
 
       setPaymentUrl(payUrl);
-      // Открываем оплату на сайте CloudPayments во внешнем браузере (не в миниаппе)
+      // Открываем оплату Т‑Банка во внешнем браузере (не в миниаппе)
       try {
         if (window.Telegram?.WebApp?.openLink) {
           window.Telegram.WebApp.openLink(payUrl);
@@ -2522,6 +2574,30 @@ export default function App() {
             </div>
 
             <div className="space-y-4">
+                <p className="text-[11px] text-gray-500 leading-relaxed text-center px-1">
+                  Оплачивая, вы принимаете{' '}
+                  <button
+                    type="button"
+                    className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+                    onClick={() => {
+                      setDocContent({ title: 'Договор оферты', text: publicPages.offer });
+                      setDocModalOpen(true);
+                    }}
+                  >
+                    оферту
+                  </button>
+                  {' '}и соглашаетесь на{' '}
+                  <button
+                    type="button"
+                    className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+                    onClick={() => {
+                      setDocContent({ title: 'Политика конфиденциальности', text: publicPages.privacy });
+                      setDocModalOpen(true);
+                    }}
+                  >
+                    обработку персональных данных
+                  </button>
+                </p>
                 <Button
                   onClick={wizardActivate}
                   disabled={paymentStarting}
@@ -2535,6 +2611,19 @@ export default function App() {
                       ? 'Оплатить 10 ₽'
                       : `Оплатить ${priceAfterPromoDiscount(wizardPlan?.price || 0)} ₽`}
                 </Button>
+                {(wizardPlan?.price || 0) > 0 || wizardPlan?.isTrial ? (
+                  <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[10px] text-gray-500">
+                    <span className="font-medium text-gray-400">Оплата через Т‑Банк</span>
+                    <span className="text-gray-600">·</span>
+                    <span>Мир</span>
+                    <span className="text-gray-600">·</span>
+                    <span>Visa</span>
+                    <span className="text-gray-600">·</span>
+                    <span>Mastercard</span>
+                    <span className="text-gray-600">·</span>
+                    <span>СБП</span>
+                  </div>
+                ) : null}
             </div>
         </div>
       )}
@@ -2819,6 +2908,41 @@ export default function App() {
               ? 'Переходим к оплате...'
               : `Продлить за ${extendPlan ? priceAfterPromoDiscount(extendPlan.price) : 0} ₽`}
           </Button>
+          <p className="text-[11px] text-gray-500 leading-relaxed text-center px-1 mt-3">
+            Оплачивая, вы принимаете{' '}
+            <button
+              type="button"
+              className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+              onClick={() => {
+                setDocContent({ title: 'Договор оферты', text: publicPages.offer });
+                setDocModalOpen(true);
+              }}
+            >
+              оферту
+            </button>
+            {' '}и соглашаетесь на{' '}
+            <button
+              type="button"
+              className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+              onClick={() => {
+                setDocContent({ title: 'Политика конфиденциальности', text: publicPages.privacy });
+                setDocModalOpen(true);
+              }}
+            >
+              обработку персональных данных
+            </button>
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[10px] text-gray-500 mt-2">
+            <span className="font-medium text-gray-400">Оплата через Т‑Банк</span>
+            <span className="text-gray-600">·</span>
+            <span>Мир</span>
+            <span className="text-gray-600">·</span>
+            <span>Visa</span>
+            <span className="text-gray-600">·</span>
+            <span>Mastercard</span>
+            <span className="text-gray-600">·</span>
+            <span>СБП</span>
+          </div>
         </div>
       </div>
     );
@@ -2856,6 +2980,17 @@ export default function App() {
         )}
         <div className="mt-4 text-xs text-slate-500">
           {paymentChecking ? 'Проверка оплаты...' : 'Автоматическая проверка каждые 3 сек.'}
+        </div>
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[10px] text-gray-500">
+          <span className="font-medium text-gray-400">Оплата через Т‑Банк</span>
+          <span className="text-gray-600">·</span>
+          <span>Мир</span>
+          <span className="text-gray-600">·</span>
+          <span>Visa</span>
+          <span className="text-gray-600">·</span>
+          <span>Mastercard</span>
+          <span className="text-gray-600">·</span>
+          <span>СБП</span>
         </div>
         <button
           onClick={() => openSupportChat()}
@@ -3496,26 +3631,56 @@ export default function App() {
       {}
       {view === 'home' && (
       <div className="fixed bottom-[5.5rem] left-0 right-0 max-w-md mx-auto px-4 py-2 z-10 pointer-events-none">
-        <div className="pointer-events-auto flex items-center justify-center gap-4 text-xs text-gray-500">
-          <button
-            onClick={() => {
-              setDocContent({ title: 'Договор оферты', text: publicPages.offer });
-              setDocModalOpen(true);
-            }}
-            className="hover:text-blue-400 transition-colors"
-          >
-            Договор оферты
-          </button>
-          <span className="text-gray-600">•</span>
-          <button
-            onClick={() => {
-              setDocContent({ title: 'Политика конфиденциальности', text: publicPages.privacy });
-              setDocModalOpen(true);
-            }}
-            className="hover:text-blue-400 transition-colors"
-          >
-            Политика конфиденциальности
-          </button>
+        <div className="pointer-events-auto flex flex-col items-center gap-2">
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs text-gray-500">
+            <button
+              onClick={() => {
+                setDocContent({ title: 'Договор оферты', text: publicPages.offer });
+                setDocModalOpen(true);
+              }}
+              className="hover:text-blue-400 transition-colors"
+            >
+              Договор оферты
+            </button>
+            <button
+              onClick={() => {
+                setDocContent({ title: 'Политика конфиденциальности', text: publicPages.privacy });
+                setDocModalOpen(true);
+              }}
+              className="hover:text-blue-400 transition-colors"
+            >
+              Политика конфиденциальности
+            </button>
+            <button
+              onClick={() => {
+                setDocContent({ title: 'Контакты', text: publicPages.contacts });
+                setDocModalOpen(true);
+              }}
+              className="hover:text-blue-400 transition-colors"
+            >
+              Контакты
+            </button>
+            <button
+              onClick={() => {
+                setDocContent({ title: 'Возврат и обмен', text: publicPages.returns });
+                setDocModalOpen(true);
+              }}
+              className="hover:text-blue-400 transition-colors"
+            >
+              Возврат и обмен
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[10px] text-gray-600">
+            <span className="font-medium text-gray-500">Оплата через Т‑Банк</span>
+            <span>·</span>
+            <span>Мир</span>
+            <span>·</span>
+            <span>Visa</span>
+            <span>·</span>
+            <span>Mastercard</span>
+            <span>·</span>
+            <span>СБП</span>
+          </div>
         </div>
       </div>
       )}

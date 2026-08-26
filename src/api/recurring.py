@@ -1,4 +1,4 @@
-"""Self-managed CloudPayments recurring charges + VPN renewals."""
+"""Self-managed T-Bank recurring charges + VPN renewals."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from src.api import cloudpayments, remnawave
+from src.api import remnawave, tbank
 from src.core import core
 from src.database import database
+
+PAYMENT_PROVIDER = 'TBank'
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,7 @@ def save_card_token(
     token: str,
     card_last4: Optional[str] = None,
     card_brand: Optional[str] = None,
+    provider: str = PAYMENT_PROVIDER,
 ) -> Optional[int]:
     if not token:
         return None
@@ -97,7 +100,7 @@ def save_card_token(
             INSERT INTO saved_payment_methods (
                 user_id, payment_provider, payment_method_id, payment_method_type,
                 card_last4, card_brand, is_active
-            ) VALUES (?, 'CloudPayments', ?, 'card', ?, ?, 1)
+            ) VALUES (?, ?, ?, 'card', ?, ?, 1)
             ON CONFLICT(user_id, payment_provider, payment_method_id)
             DO UPDATE SET
                 is_active = 1,
@@ -105,15 +108,15 @@ def save_card_token(
                 card_brand = COALESCE(excluded.card_brand, saved_payment_methods.card_brand),
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (user_id, token, card_last4, card_brand),
+            (user_id, provider, token, card_last4, card_brand),
         )
         conn.commit()
         cursor.execute(
             """
             SELECT id FROM saved_payment_methods
-            WHERE user_id = ? AND payment_provider = 'CloudPayments' AND payment_method_id = ?
+            WHERE user_id = ? AND payment_provider = ? AND payment_method_id = ?
             """,
-            (user_id, token),
+            (user_id, provider, token),
         )
         row = cursor.fetchone()
         return int(row['id']) if row else None
@@ -172,10 +175,10 @@ def extend_vpn_key(
     devices_limit: Optional[int] = None,
     traffic_limit: Optional[int] = None,
     notify: bool = True,
-    payment_method: str = 'CloudPayments',
+    payment_method: str = 'TBank',
     payment_id: Optional[str] = None,
 ) -> bool:
-    if payment_id and database.transaction_exists_by_payment_id(str(payment_id), 'CloudPayments'):
+    if payment_id and database.transaction_exists_by_payment_id(str(payment_id), 'TBank'):
         logger.info('extend_vpn_key skip duplicate payment_id=%s', payment_id)
         return True
 
@@ -261,7 +264,7 @@ def extend_vpn_key(
             INSERT INTO transactions (
                 user_id, type, amount, status, description, payment_method,
                 payment_provider, payment_id, duration_days
-            ) VALUES (?, 'subscription_extend', ?, 'Success', ?, ?, 'CloudPayments', ?, ?)
+            ) VALUES (?, 'subscription_extend', ?, 'Success', ?, ?, 'TBank', ?, ?)
             """,
             (
                 user_id, -float(amount), f'Автопродление подписки ({days} дн.)',
@@ -471,7 +474,7 @@ def handle_successful_charge(
         return False
 
     # Реферальный доход — начисляем здесь, используя transaction_id как dedup ключ
-    # (transaction_id уникален per CloudPayments платёж)
+    # (transaction_id уникален per TBank платёж)
     try:
         if charge_amount > 0 and transaction_id:
             ref_result = database.credit_referral_income(
@@ -541,13 +544,13 @@ def _charge_one(sub: Dict[str, Any]) -> None:
         return
 
     invoice_id = f'renew_{sub_id}_{uuid.uuid4().hex[:10]}'
-    result = cloudpayments.cloudpayments_api.charge_by_token(
+    result = tbank.tbank_api.charge_by_rebill(
         amount=amount,
-        account_id=str(user_id),
-        token=token,
-        invoice_id=invoice_id,
+        order_id=invoice_id[:36],
+        rebill_id=token,
         description=f'1FEDERAL VPN — автопродление ({int(sub.get("duration_days") or 30)} дн.)',
-        json_data={
+        customer_key=str(user_id),
+        data={
             'subscription_id': sub_id,
             'user_id': user_id,
             'kind': 'recurring_renewal',
@@ -555,15 +558,15 @@ def _charge_one(sub: Dict[str, Any]) -> None:
     )
 
     if result.get('ok'):
-        tx_id = result.get('transaction_id')
-        if tx_id and database.transaction_exists_by_payment_id(str(tx_id), 'CloudPayments'):
+        tx_id = result.get('transaction_id') or result.get('payment_id')
+        if tx_id and database.transaction_exists_by_payment_id(str(tx_id), PAYMENT_PROVIDER):
             logger.info('Recurring %s already processed tx=%s', sub_id, tx_id)
             return
         handle_successful_charge(sub, transaction_id=tx_id, amount=amount)
         return
 
     status = str(result.get('status') or '')
-    if status in ('AwaitingAuthentication', 'Pending'):
+    if status in ('NEW', 'FORM_SHOWED', 'AUTHORIZING', '3DS_CHECKING', '3DS_CHECKED'):
         database.update_recurring_subscription(
             sub_id,
             next_charge_at=_iso(_now() + timedelta(minutes=15)),

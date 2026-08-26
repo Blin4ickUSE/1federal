@@ -60,6 +60,7 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   }
   const res = await fetch(url, { ...options, headers });
   if (!res.ok) {
+    // Only 401 logs out; 403 stays signed in and surfaces the error
     if (res.status === 401) { clearPanelSecret(); window.location.reload(); }
     const t = await res.text();
     throw new Error(parseApiError(res.status, t));
@@ -446,7 +447,7 @@ const FinancePage: React.FC<{ transactions: any[]; onSelect: (t: any) => void }>
   useEffect(() => { apiFetch('/panel/finance/stats').then(d => d && setStats(d)).catch(console.error); }, []);
   return (
     <div className="flex flex-col gap-6 rise">
-      <div><div className="h-page">Финансы</div><div className="sub mt-1">Доходы, операции и возвраты CloudPayments</div></div>
+      <div><div className="h-page">Финансы</div><div className="sub mt-1">Доходы, операции и возвраты Т‑Банк</div></div>
       <div className="grid grid-cols-2 gap-4">
         <Stat title="Доход" value={stats ? fmtM(stats.deposits) : '—'} icon={ArrowUpRight} />
         <Stat title="Успешные платежи" value={stats ? fmtN(stats.successfulOps) : '—'} icon={Activity} sub="платежей" />
@@ -485,7 +486,7 @@ const TransactionModal: React.FC<{ tx: any; onClose: () => void; onRefunded?: ()
   const canRefund = tx.amount > 0 && String(tx.status).toLowerCase() === 'success' && ['subscription', 'subscription_extend'].includes(tx.type);
 
   const doRefund = async () => {
-    if (!canRefund || !confirm(`Вернуть ${tx.amount}₽ через CloudPayments?`)) return;
+    if (!canRefund || !confirm(`Вернуть ${tx.amount}₽ через Т‑Банк?`)) return;
     setBusy(true);
     try {
       const d = await apiFetch(`/panel/transactions/${tx.id}/refund`, { method: 'POST' });
@@ -504,7 +505,7 @@ const TransactionModal: React.FC<{ tx: any; onClose: () => void; onRefunded?: ()
       footer={<>
         {canRefund && (
           <button className="btn block danger" disabled={busy} onClick={doRefund}>
-            {busy ? <Spinner size={14} /> : 'Вернуть через CloudPayments'}
+            {busy ? <Spinner size={14} /> : 'Вернуть через Т‑Банк'}
           </button>
         )}
         <button className="btn block" onClick={onClose}>Закрыть</button>
@@ -1178,7 +1179,7 @@ const UserDetailPage: React.FC<{
                             className="btn sm danger"
                             disabled={saving === `refund_${tx.id}`}
                             onClick={async () => {
-                              if (!confirm(`Вернуть ${tx.amount}₽ через CloudPayments?`)) return;
+                              if (!confirm(`Вернуть ${tx.amount}₽ через Т‑Банк?`)) return;
                               setSaving(`refund_${tx.id}`);
                               try {
                                 const d = await apiFetch(`/panel/transactions/${tx.id}/refund`, { method: 'POST' });
@@ -1895,11 +1896,332 @@ const SquadsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) =>
 };
 
 // ─── SETTINGS PAGE ────────────────────────────────────────────────
+const ROLE_TABS: { key: string; label: string }[] = [
+  { key: 'dashboard', label: 'Главная' },
+  { key: 'finance', label: 'Финансы' },
+  { key: 'stats', label: 'Статистика' },
+  { key: 'users', label: 'Пользователи' },
+  { key: 'mailing', label: 'Рассылка' },
+  { key: 'promocodes', label: 'Промокоды' },
+  { key: 'squads', label: 'Сквады' },
+  { key: 'settings', label: 'Настройки' },
+  { key: 'roles', label: 'Роли' },
+];
+
+const PAGE_TO_PERM: Record<string, string> = {
+  'Главная': 'dashboard',
+  'Финансы': 'finance',
+  'Статистика': 'stats',
+  'Пользователи': 'users',
+  'Рассылка': 'mailing',
+  'Промокоды': 'promocodes',
+  'Сквады': 'squads',
+  'Настройки': 'settings',
+  'Роли': 'roles',
+};
+
+const emptyPerms = (): Record<string, string> =>
+  Object.fromEntries(ROLE_TABS.map(t => [t.key, 'none']));
+
+const PermissionsMatrix: React.FC<{
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+  disabled?: boolean;
+}> = ({ value, onChange, disabled }) => (
+  <div className="tbl-wrap">
+    <table className="tbl">
+      <thead>
+        <tr>
+          <th>Раздел</th>
+          <th>Нет</th>
+          <th>Просмотр</th>
+          <th>Редактирование</th>
+        </tr>
+      </thead>
+      <tbody>
+        {ROLE_TABS.map(tab => {
+          const cur = value[tab.key] || 'none';
+          return (
+            <tr key={tab.key}>
+              <td style={{ fontWeight: 500 }}>{tab.label}</td>
+              {(['none', 'view', 'edit'] as const).map(level => (
+                <td key={level}>
+                  <input
+                    type="radio"
+                    name={`perm-${tab.key}`}
+                    checked={cur === level}
+                    disabled={disabled}
+                    onChange={() => onChange({ ...value, [tab.key]: level })}
+                  />
+                </td>
+              ))}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+);
+
+const RolesPage: React.FC<{
+  onToast: (t: string, m?: string, ty?: ToastType) => void;
+  currentUsername?: string;
+  canEdit: boolean;
+}> = ({ onToast, currentUsername, canEdit }) => {
+  const [loading, setLoading] = useState(true);
+  const [admins, setAdmins] = useState<any[]>([]);
+  const [modal, setModal] = useState<'add' | 'edit' | null>(null);
+  const [editing, setEditing] = useState<any | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    username: '',
+    password: '',
+    telegram_id: '',
+    is_superadmin: false,
+    is_active: true,
+    permissions: emptyPerms(),
+  });
+  const [pwdModal, setPwdModal] = useState<any | null>(null);
+  const [newPwd, setNewPwd] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const d = await apiFetch('/panel/admins');
+      setAdmins(Array.isArray(d?.admins) ? d.admins : (Array.isArray(d) ? d : []));
+    } catch (e: any) {
+      onToast('Ошибка загрузки админов', e.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const openAdd = () => {
+    setEditing(null);
+    setForm({ username: '', password: '', telegram_id: '', is_superadmin: false, is_active: true, permissions: emptyPerms() });
+    setModal('add');
+  };
+
+  const openEdit = (a: any) => {
+    setEditing(a);
+    setForm({
+      username: a.username || '',
+      password: '',
+      telegram_id: a.telegram_id != null ? String(a.telegram_id) : '',
+      is_superadmin: !!a.is_superadmin,
+      is_active: a.is_active !== false && a.is_active !== 0,
+      permissions: { ...emptyPerms(), ...(a.permissions || {}) },
+    });
+    setModal('edit');
+  };
+
+  const save = async () => {
+    if (!form.username.trim()) { onToast('Укажите логин', undefined, 'error'); return; }
+    if (!form.telegram_id.trim()) { onToast('Укажите Telegram ID', undefined, 'error'); return; }
+    if (modal === 'add' && form.password.length < 8) { onToast('Пароль минимум 8 символов', undefined, 'error'); return; }
+    setSaving(true);
+    try {
+      if (modal === 'add') {
+        await apiFetch('/panel/admins', {
+          method: 'POST',
+          body: JSON.stringify({
+            username: form.username.trim(),
+            password: form.password,
+            telegram_id: parseInt(form.telegram_id, 10),
+            is_superadmin: form.is_superadmin,
+            permissions: form.is_superadmin ? emptyPerms() : form.permissions,
+          }),
+        });
+        onToast('Админ создан', undefined, 'success');
+      } else if (editing) {
+        const body: any = {
+          username: form.username.trim(),
+          telegram_id: parseInt(form.telegram_id, 10),
+          is_superadmin: form.is_superadmin,
+          is_active: form.is_active,
+          permissions: form.is_superadmin ? emptyPerms() : form.permissions,
+        };
+        if (form.password.length >= 8) body.password = form.password;
+        await apiFetch(`/panel/admins/${editing.id}`, { method: 'PUT', body: JSON.stringify(body) });
+        onToast('Админ обновлён', undefined, 'success');
+      }
+      setModal(null);
+      load();
+    } catch (e: any) {
+      onToast('Ошибка', e.message, 'error');
+    }
+    setSaving(false);
+  };
+
+  const remove = async (a: any) => {
+    if (!confirm(`Удалить / деактивировать админа «${a.username}»?`)) return;
+    try {
+      await apiFetch(`/panel/admins/${a.id}`, { method: 'DELETE' });
+      onToast('Админ удалён', undefined, 'success');
+      load();
+    } catch (e: any) {
+      onToast('Ошибка', e.message, 'error');
+    }
+  };
+
+  const changePwd = async () => {
+    if (!pwdModal || newPwd.length < 8) { onToast('Пароль минимум 8 символов', undefined, 'error'); return; }
+    try {
+      await apiFetch(`/panel/admins/${pwdModal.id}/password`, {
+        method: 'POST',
+        body: JSON.stringify({ password: newPwd }),
+      });
+      onToast('Пароль изменён', undefined, 'success');
+      setPwdModal(null);
+      setNewPwd('');
+    } catch (e: any) {
+      onToast('Ошибка', e.message, 'error');
+    }
+  };
+
+  if (loading) return <div className="flex items-center justify-center" style={{ height: 200 }}><Spinner size={28} /></div>;
+
+  return (
+    <div className="flex flex-col gap-6 rise">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="h-page">Роли</div>
+          <div className="sub mt-1">Администраторы панели и права доступа</div>
+        </div>
+        {canEdit && (
+          <button className="btn sm solid" onClick={openAdd}><Plus size={13} /> Добавить</button>
+        )}
+      </div>
+
+      <div className="card" style={{ padding: 0 }}>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Логин</th>
+                <th>Telegram ID</th>
+                <th>Роль</th>
+                <th>Активен</th>
+                <th>Последний вход</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {admins.length === 0 ? (
+                <tr className="empty-row"><td colSpan={6}>Нет администраторов</td></tr>
+              ) : admins.map(a => (
+                <tr key={a.id}>
+                  <td style={{ fontWeight: 500 }}>
+                    {a.username}
+                    {a.username === currentUsername && <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>(вы)</span>}
+                  </td>
+                  <td className="mono">{a.telegram_id ?? '—'}</td>
+                  <td>{a.is_superadmin ? 'Супер‑админ' : 'Админ'}</td>
+                  <td>{a.is_active === false || a.is_active === 0 ? <span className="muted">Нет</span> : 'Да'}</td>
+                  <td className="muted">{fmtDate(a.last_login)}</td>
+                  <td>
+                    <div className="flex gap-1 justify-end">
+                      {canEdit && (
+                        <>
+                          <button className="btn sm" title="Изменить" onClick={() => openEdit(a)}><Edit size={12} /></button>
+                          <button className="btn sm" title="Сменить пароль" onClick={() => { setPwdModal(a); setNewPwd(''); }}><Lock size={12} /></button>
+                          <button className="btn sm danger" title="Удалить" onClick={() => remove(a)}><Trash2 size={12} /></button>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {modal && (
+        <Modal
+          onClose={() => setModal(null)}
+          title={modal === 'add' ? 'Новый админ' : 'Редактировать админа'}
+          icon={Shield}
+          width={560}
+          footer={
+            <div className="flex gap-2 justify-end">
+              <button className="btn sm" onClick={() => setModal(null)}>Отмена</button>
+              <button className="btn sm solid" disabled={saving} onClick={save}>
+                {saving ? <Spinner size={14} /> : <><Save size={13} /> Сохранить</>}
+              </button>
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="field-label">Логин</label>
+                <input className="input" value={form.username} onChange={e => setForm(p => ({ ...p, username: e.target.value }))} />
+              </div>
+              <div>
+                <label className="field-label">Telegram ID</label>
+                <input className="input" value={form.telegram_id} onChange={e => setForm(p => ({ ...p, telegram_id: e.target.value }))} placeholder="123456789" />
+              </div>
+              <div>
+                <label className="field-label">{modal === 'add' ? 'Пароль' : 'Новый пароль (опц.)'}</label>
+                <input className="input" type="password" value={form.password} onChange={e => setForm(p => ({ ...p, password: e.target.value }))} placeholder="мин. 8 символов" />
+              </div>
+              <div className="flex flex-col gap-2 justify-end pb-1">
+                <label className="flex items-center gap-2" style={{ fontSize: 13, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={form.is_superadmin} onChange={e => setForm(p => ({ ...p, is_superadmin: e.target.checked }))} />
+                  Супер‑админ (полный доступ)
+                </label>
+                {modal === 'edit' && (
+                  <label className="flex items-center gap-2" style={{ fontSize: 13, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={form.is_active} onChange={e => setForm(p => ({ ...p, is_active: e.target.checked }))} />
+                    Активен
+                  </label>
+                )}
+              </div>
+            </div>
+            {form.is_superadmin ? (
+              <p className="sub" style={{ fontSize: 13 }}>Супер‑админ имеет полный доступ ко всем разделам. Матрица прав отключена.</p>
+            ) : (
+              <>
+                <div className="field-label mb-1">Права доступа</div>
+                <PermissionsMatrix
+                  value={form.permissions}
+                  onChange={perms => setForm(p => ({ ...p, permissions: perms }))}
+                />
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {pwdModal && (
+        <Modal
+          onClose={() => setPwdModal(null)}
+          title={`Пароль: ${pwdModal.username}`}
+          icon={Lock}
+          width={400}
+          footer={
+            <div className="flex gap-2 justify-end">
+              <button className="btn sm" onClick={() => setPwdModal(null)}>Отмена</button>
+              <button className="btn sm solid" onClick={changePwd}><Check size={13} /> Сменить</button>
+            </div>
+          }
+        >
+          <label className="field-label">Новый пароль</label>
+          <input className="input" type="password" value={newPwd} onChange={e => setNewPwd(e.target.value)} placeholder="минимум 8 символов" />
+        </Modal>
+      )}
+    </div>
+  );
+};
+
 const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) => void; onLogout: () => void }> = ({ onToast, onLogout }) => {
   const [loading, setLoading] = useState(true);
   const [savingBackup, setSavingBackup] = useState(false);
   const [savingTariffs, setSavingTariffs] = useState(false);
   const [sendingBackup, setSendingBackup] = useState(false);
+  const [savingPay, setSavingPay] = useState(false);
   // Backup
   const [backupEnabled, setBackupEnabled] = useState(false);
   const [intervalMin, setIntervalMin] = useState(360);
@@ -1917,18 +2239,37 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
   const [trialTrafficGb, setTrialTrafficGb] = useState(10);
   const [paidTrafficGb, setPaidTrafficGb] = useState(10240);
   const [familyTrafficGb, setFamilyTrafficGb] = useState(10240);
+  // T-Bank
+  const [tbTerminal, setTbTerminal] = useState('');
+  const [tbPassword, setTbPassword] = useState('');
+  const [tbApiUrl, setTbApiUrl] = useState('https://securepay.tinkoff.ru');
+  const [tbTaxation, setTbTaxation] = useState('');
+  const [tbVat, setTbVat] = useState('none');
+  const [tbHasPassword, setTbHasPassword] = useState(false);
+  const [tbConfigured, setTbConfigured] = useState(false);
+  const [tbNotifyHint, setTbNotifyHint] = useState('');
 
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [bk, tr, sys] = await Promise.all([
+      const [bk, tr, sys, pay] = await Promise.all([
         apiFetch('/panel/backups/status'),
         apiFetch('/panel/tariffs'),
         apiFetch('/panel/system-settings'),
+        apiFetch('/panel/payment-settings').catch(() => null),
       ]);
       if (bk) { setBackupEnabled(!!bk.enabled); setIntervalMin(bk.interval_minutes || 360); setLastBackup(bk.last_backup || null); }
       if (tr) setTariffs(Array.isArray(tr) ? tr : (tr.tariffs || []));
       if (sys) { setTrialTariffId(String(sys.trial_tariff_id || '')); setTrialDevices(sys.trial_devices_limit || 1); setPaidDevices(sys.paid_devices_limit || 2); setFamilyDevices(sys.family_devices_limit || 5); setTrialTrafficGb(sys.trial_traffic_gb || 10); setPaidTrafficGb(sys.paid_traffic_gb || 10240); setFamilyTrafficGb(sys.family_traffic_gb || 10240); }
+      const tb = pay?.tbank || {};
+      setTbTerminal(tb.terminal_key || '');
+      setTbApiUrl(tb.api_url || 'https://securepay.tinkoff.ru');
+      setTbTaxation(tb.taxation || '');
+      setTbVat(tb.vat || 'none');
+      setTbHasPassword(tb.has_password === '1' || tb.has_password === true);
+      setTbConfigured(tb.configured === '1' || tb.configured === true);
+      setTbNotifyHint(tb.notification_url_hint || '');
+      setTbPassword('');
     } catch (e: any) { onToast('Ошибка загрузки настроек', e.message, 'error'); }
     setLoading(false);
   };
@@ -2002,6 +2343,25 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
     } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
   };
 
+  const saveTbank = async () => {
+    setSavingPay(true);
+    try {
+      const body: Record<string, string> = {
+        terminal_key: tbTerminal.trim(),
+        api_url: tbApiUrl.trim() || 'https://securepay.tinkoff.ru',
+        taxation: tbTaxation.trim(),
+        vat: tbVat.trim() || 'none',
+      };
+      if (tbPassword.trim()) body.password = tbPassword.trim();
+      if (tbNotifyHint.trim()) body.notification_url = tbNotifyHint.trim();
+      await apiFetch('/panel/payment-settings/tbank', { method: 'PUT', body: JSON.stringify(body) });
+      onToast('Настройки Т‑Банка сохранены', undefined, 'success');
+      setTbPassword('');
+      loadAll();
+    } catch (e: any) { onToast('Ошибка', e.message, 'error'); }
+    setSavingPay(false);
+  };
+
   const fmtInterval = (min: number) => {
     if (min < 60) return `${min} мин`;
     const h = Math.floor(min / 60), m = min % 60;
@@ -2018,6 +2378,53 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
   return (
     <div className="flex flex-col gap-6 rise">
       <div><div className="h-page">Настройки</div><div className="sub mt-1">Управление системой</div></div>
+
+      {/* ── Т‑БАНК ── */}
+      <div className="card" style={{ padding: 24 }}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="h-sec">Т‑Банк эквайринг</h3>
+          <span className={`badge ${tbConfigured ? 'solid' : 'line'}`}>{tbConfigured ? 'Настроен' : 'Не настроен'}</span>
+        </div>
+        <p className="sub mb-4" style={{ fontSize: 13 }}>
+          TerminalKey и пароль из личного кабинета интернет-эквайринга.{' '}
+          <a href="https://developer.tbank.ru/eacq/intro" target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>Документация</a>
+        </p>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className="field-label">Terminal Key</label>
+            <input className="input" value={tbTerminal} onChange={e => setTbTerminal(e.target.value)} placeholder="Tinkoff..." autoComplete="off" />
+          </div>
+          <div>
+            <label className="field-label">Пароль терминала {tbHasPassword ? '(сохранён)' : ''}</label>
+            <input className="input" type="password" value={tbPassword} onChange={e => setTbPassword(e.target.value)} placeholder={tbHasPassword ? '•••••••• (оставьте пустым, чтобы не менять)' : 'Пароль из ЛК'} autoComplete="new-password" />
+          </div>
+          <div>
+            <label className="field-label">API URL</label>
+            <input className="input" value={tbApiUrl} onChange={e => setTbApiUrl(e.target.value)} placeholder="https://securepay.tinkoff.ru" />
+          </div>
+          <div>
+            <label className="field-label">Система налогообложения (для чека)</label>
+            <input className="input" value={tbTaxation} onChange={e => setTbTaxation(e.target.value)} placeholder="пусто = без чека; usn_income / osn / ..." />
+          </div>
+          <div>
+            <label className="field-label">НДС в чеке</label>
+            <select className="select" value={tbVat} onChange={e => setTbVat(e.target.value)}>
+              <option value="none">none</option>
+              <option value="vat0">vat0</option>
+              <option value="vat10">vat10</option>
+              <option value="vat20">vat20</option>
+            </select>
+          </div>
+        </div>
+        <div className="inset mb-4" style={{ padding: 12, fontSize: 12 }}>
+          <div className="eyebrow mb-1">NotificationURL</div>
+          <code style={{ wordBreak: 'break-all' }}>{tbNotifyHint || 'https://ВАШ_ДОМЕН/tbank'}</code>
+          <div className="sub mt-1">Укажите этот URL в ЛК Т‑Банка (уведомления о платежах).</div>
+        </div>
+        <button className="btn solid" disabled={savingPay} onClick={saveTbank}>
+          {savingPay ? <Spinner size={14} /> : <><Save size={14} /> Сохранить Т‑Банк</>}
+        </button>
+      </div>
 
       {/* ── ТАРИФЫ ── */}
       <div className="card" style={{ padding: 24 }}>
@@ -2214,15 +2621,57 @@ const SettingsPage: React.FC<{ onToast: (t: string, m?: string, ty?: ToastType) 
 function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
   const { toasts, add: addToast, remove: removeToast } = useToast();
   const [activePage, setActivePage] = useState('Главная');
-  const [openUserId, setOpenUserId] = useState<number | null>(null);  // internal users.id
+  const [openUserId, setOpenUserId] = useState<number | null>(null);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
+  const [permissions, setPermissions] = useState<Record<string, string>>({});
+  const [isSuperadmin, setIsSuperadmin] = useState(false);
+  const [username, setUsername] = useState('');
+  const [permsReady, setPermsReady] = useState(false);
 
-  // Finance state (kept at top level to share between FinancePage and modal)
   const [transactions, setTransactions] = useState<any[]>([]);
   const [selectedTx, setSelectedTx] = useState<any | null>(null);
-
-  // Revenue total for topbar
   const [totalRevenue, setTotalRevenue] = useState(0);
+
+  const canView = useCallback((pageName: string) => {
+    if (isSuperadmin) return true;
+    const key = PAGE_TO_PERM[pageName];
+    if (!key) return true;
+    const lvl = permissions[key] || 'none';
+    return lvl === 'view' || lvl === 'edit';
+  }, [isSuperadmin, permissions]);
+
+  const canEdit = useCallback((pageName: string) => {
+    if (isSuperadmin) return true;
+    const key = PAGE_TO_PERM[pageName];
+    if (!key) return true;
+    return (permissions[key] || 'none') === 'edit';
+  }, [isSuperadmin, permissions]);
+
+  useEffect(() => {
+    apiFetch('/panel/auth/check')
+      .then(d => {
+        if (!d?.authenticated) return;
+        setPermissions(d.permissions || {});
+        setIsSuperadmin(!!d.is_superadmin);
+        setUsername(d.username || '');
+        setPermsReady(true);
+      })
+      .catch(() => setPermsReady(true));
+  }, []);
+
+  useEffect(() => {
+    if (!permsReady) return;
+    if (!canView(activePage)) {
+      const first = ROLE_TABS.find(t => {
+        const name = Object.keys(PAGE_TO_PERM).find(n => PAGE_TO_PERM[n] === t.key);
+        return name ? canView(name) : false;
+      });
+      if (first) {
+        const name = Object.keys(PAGE_TO_PERM).find(n => PAGE_TO_PERM[n] === first.key);
+        if (name) setActivePage(name);
+      }
+    }
+  }, [permsReady, permissions, isSuperadmin, activePage, canView]);
 
   useEffect(() => {
     apiFetch('/panel/stats/summary').then(d => { if (d) setTotalRevenue(d.monthly_revenue || 0); }).catch(() => {});
@@ -2249,7 +2698,6 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     if (activePage === 'Финансы') loadFinance();
   }, [activePage, loadFinance]);
 
-  // ?uid=internal_user_id | ?tg=telegram_id (never ambiguous ?user=)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const uid = params.get('uid');
@@ -2296,8 +2744,11 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Финансы', icon: DollarSign }, { name: 'Статистика', icon: BarChart2 }] },
     { group: 'Данные', items: [{ name: 'Пользователи', icon: Users }] },
     { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Gift }] },
-    { group: 'Система', items: [{ name: 'Сквады', icon: Layers }, { name: 'Настройки', icon: Settings }] },
-  ];
+    { group: 'Система', items: [{ name: 'Сквады', icon: Layers }, { name: 'Настройки', icon: Settings }, { name: 'Роли', icon: Shield }] },
+  ].map(section => ({
+    ...section,
+    items: section.items.filter(item => canView(item.name)),
+  })).filter(section => section.items.length > 0);
 
   return (
     <div className="panel-shell">
@@ -2306,7 +2757,9 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
       <aside className={`panel-sidebar ${isMobileOpen ? 'open' : ''}`}>
         <div className="panel-sidebar-brand">
           <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: '-0.01em' }}>1FEDERAL</div>
-          <div className="sub" style={{ fontSize: 11, marginTop: 2 }}>Admin Panel</div>
+          <div className="sub" style={{ fontSize: 11, marginTop: 2 }}>
+            {username ? `@${username}` : 'Admin Panel'}{isSuperadmin ? ' · full' : ''}
+          </div>
           <button type="button" className="icon-btn panel-sidebar-close" onClick={() => setIsMobileOpen(false)} aria-label="Закрыть меню">
             <X size={17} />
           </button>
@@ -2357,7 +2810,13 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <div className="panel-page">
-          {openUserId && activePage === 'Пользователи' ? (
+          {!canView(activePage) ? (
+            <div className="card rise" style={{ padding: 40, textAlign: 'center' }}>
+              <Shield size={28} className="faint" style={{ margin: '0 auto 12px' }} />
+              <div className="h-sec">403 — доступ запрещён</div>
+              <p className="sub mt-2">Нет прав на раздел «{activePage}».</p>
+            </div>
+          ) : openUserId && activePage === 'Пользователи' ? (
             <UserDetailPage
               userId={openUserId}
               onBack={() => closeUser()}
@@ -2381,11 +2840,17 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
               )}
               {activePage === 'Статистика' && <StatisticsPage />}
               {activePage === 'Пользователи' && <UsersPage onOpenUser={openUser} />}
-
               {activePage === 'Рассылка' && <MailingPage onToast={addToast} />}
               {activePage === 'Промокоды' && <PromocodesPage onToast={addToast} />}
               {activePage === 'Сквады' && <SquadsPage onToast={addToast} />}
               {activePage === 'Настройки' && <SettingsPage onToast={addToast} onLogout={onLogout} />}
+              {activePage === 'Роли' && (
+                <RolesPage
+                  onToast={addToast}
+                  currentUsername={username}
+                  canEdit={canEdit('Роли')}
+                />
+              )}
             </>
           )}
         </div>
