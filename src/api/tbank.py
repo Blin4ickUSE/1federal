@@ -137,7 +137,7 @@ class TBankAPI:
         fail_url: Optional[str] = None,
         notification_url: Optional[str] = None,
         email: Optional[str] = None,
-        recurrent: bool = True,
+        recurrent: bool = False,
         data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         amount_kop = int(round(float(amount) * 100))
