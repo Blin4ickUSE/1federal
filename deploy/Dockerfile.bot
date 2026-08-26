@@ -4,11 +4,18 @@ WORKDIR /app
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=120 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 COPY requirements.txt requirements-bot.txt ./
 COPY deploy/pip_install.sh /tmp/pip_install.sh
-RUN chmod +x /tmp/pip_install.sh && /tmp/pip_install.sh requirements-bot.txt
+COPY deploy/install_russian_trusted_ca.sh /tmp/install_russian_trusted_ca.sh
+RUN chmod +x /tmp/pip_install.sh /tmp/install_russian_trusted_ca.sh \
+    && /tmp/pip_install.sh requirements-bot.txt \
+    && /tmp/install_russian_trusted_ca.sh \
+    && rm -f /tmp/pip_install.sh /tmp/install_russian_trusted_ca.sh
 
 COPY src/ ./src/
 
