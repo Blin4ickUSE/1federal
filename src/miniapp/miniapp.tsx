@@ -407,7 +407,7 @@ const PRIVACY_POLICY_TEXT = `
 
 **2.1.2. Данные для оказания услуг:** сведения о выбранном тарифе, история платежей, статус подписки, техническая информация о подключениях к Сервису.
 
-**2.1.3. Платёжные данные:** факт и сумма оплаты, идентификатор транзакции. Полные реквизиты банковской карты Оператором не собираются — их обработка осуществляется исключительно платёжным агентом (АО «ТБанк», интернет-эквайринг) в соответствии с требованиями PCI DSS.
+**2.1.3. Платёжные данные:** факт и сумма оплаты, идентификатор транзакции. Полные реквизиты банковского счёта Оператором не собираются — их обработка осуществляется исключительно платёжным агентом (Platega) в соответствии с требованиями законодательства.
 
 **2.1.4. Технические данные:** IP-адрес, данные об устройстве и программном обеспечении, файлы cookie, иные технические сведения, автоматически передаваемые при использовании Сайта.
 
@@ -440,7 +440,7 @@ const PRIVACY_POLICY_TEXT = `
 ### 6. ПЕРЕДАЧА ДАННЫХ ТРЕТЬИМ ЛИЦАМ
 
 **6.1.** Оператор не передаёт персональные данные третьим лицам, за исключением:
-* Платёжных агентов (АО «ТБанк», интернет-эквайринг) — для обработки платежей.
+* Платёжных агентов (Platega) — для обработки платежей.
 * Хостинг- и серверных провайдеров — для технического обеспечения Сервиса.
 * Государственных органов Российской Федерации — по законному запросу.
 
@@ -516,13 +516,13 @@ const RETURNS_TEXT = `
 ### Сроки
 
 * Рассмотрение обращения — в разумный срок в рабочие часы поддержки (Пн–Пт 10:00–19:00 МСК).
-* При одобрении возврата средства возвращаются в срок **не более 10 рабочих дней** на тот же способ оплаты (через АО «ТБанк»).
+* При одобрении возврата средства возвращаются в срок **не более 10 рабочих дней** на тот же способ оплаты.
 
 Обмен цифровой услуги на иной товар не производится. Подробности — в Договоре оферты (§6).
 `
 
 const VPN_PLANS_DEFAULT: Plan[] = [
-  { id: 'trial_7d', duration: 'Пробная подписка', price: 10, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
+  { id: 'trial_7d', duration: 'Пробная подписка', price: 0, highlight: false, days: 7, isTrial: true, tariffCategory: 'regular', devicesLimit: 2 },
   { id: 'reg_m1', duration: '1 месяц', price: 499, highlight: false, days: 30, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 499, benefitPercent: 0 },
   { id: 'reg_m3', duration: '3 месяца', price: 1399, highlight: false, days: 90, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 1497, benefitPercent: 6.5 },
   { id: 'reg_m6', duration: '6 месяцев', price: 2699, highlight: false, days: 180, tariffCategory: 'regular', devicesLimit: 2, oldPrice: 2994, benefitPercent: 9.9 },
@@ -1631,7 +1631,7 @@ export default function App() {
         body: JSON.stringify(body),
       });
 
-      const payUrl = res?.payment_url || res?.confirmation_url;
+      const payUrl = res?.redirect || res?.payment_url || res?.confirmation_url;
       if (!payUrl) {
         alert(res?.error || 'Не удалось создать платёж, попробуйте позже');
         setPendingAction(null);
@@ -1674,7 +1674,7 @@ export default function App() {
         />
         <div className="relative">
           <h3 className="text-base font-bold text-white uppercase tracking-wide mb-2">
-            Пробный период за 10₽
+            Бесплатный пробный период
           </h3>
           <p className="text-sm text-gray-400 mb-6">
             7 дней доступа · далее 499₽/мес с привязанной карты
@@ -1685,7 +1685,7 @@ export default function App() {
               <div className="text-xs text-gray-500 mt-1">дней</div>
             </div>
             <div>
-              <div className="text-3xl font-bold text-white leading-none">10₽</div>
+              <div className="text-3xl font-bold text-white leading-none">0₽</div>
               <div className="text-xs text-gray-500 mt-1">сейчас</div>
             </div>
             <div>
@@ -1697,7 +1697,7 @@ export default function App() {
             onClick={activateTrial}
             className="w-full py-3.5 rounded-full bg-blue-500 hover:bg-blue-600 text-white font-semibold text-sm transition-colors shadow-[0_4px_24px_rgba(59,130,246,0.35)]"
           >
-            Попробовать за 10₽
+            Попробовать бесплатно
           </button>
         </div>
       </div>
@@ -2148,7 +2148,7 @@ export default function App() {
       : priceAfterPromoDiscount(wizardPlan.price);
     const tariffLabel = wizardPlan.tariffCategory === 'family' ? 'Семейный' : 'Обычный';
     const name = wizardPlan.isTrial
-      ? 'Пробная подписка 7 дней за 10₽'
+      ? 'Пробная подписка 7 дней (бесплатно)'
       : `${tariffLabel} (${wizardPlan.duration})`;
 
     if (wizardPlan.isTrial || price > 0) {
@@ -2532,7 +2532,7 @@ export default function App() {
                   </div>
                 )}
                 {wizardPlan?.isTrial && (
-                  <div className="text-sm text-gray-500 mb-6">7 дней за 10₽ · далее 499₽/мес · до 2 устройств</div>
+                  <div className="text-sm text-gray-500 mb-6">7 дней бесплатно · далее 499₽/мес · до 2 устройств</div>
                 )}
 
                 <div className="border-t border-white/10 pt-4 flex justify-between items-center">

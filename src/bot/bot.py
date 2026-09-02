@@ -239,18 +239,7 @@ async def subscription_notifications_task():
             logger.error(f'Error in subscription_notifications_task: {e}')
             await asyncio.sleep(60)
 
-async def tbank_recurring_task():
-    """Автосписания Т‑Банк + ретраи по расписанию."""
-    while True:
-        try:
-            await asyncio.sleep(60)
-            from src.api import recurring as recurring_billing
-            n = await asyncio.to_thread(recurring_billing.process_due_charges, 50)
-            if n:
-                logger.info('T-Bank recurring: processed %s due charges', n)
-        except Exception as e:
-            logger.error(f'Error in tbank_recurring_task: {e}')
-            await asyncio.sleep(30)
+# Планировщик автосписаний удалён — Platega управляет рекуррентом на своей стороне.
 
 async def auto_renewal_task():
     while True:
@@ -367,8 +356,7 @@ async def main():
     asyncio.create_task(auto_refund_expired_withdrawals())
     asyncio.create_task(subscription_notifications_task())
     asyncio.create_task(weekly_reminder_task())
-    asyncio.create_task(tbank_recurring_task())
-    # Балансное автопродление отключено — используется Т‑Банк эквайринг
+    # Рекуррент управляется Platega — локальный планировщик не нужен
     logger.info('Бот запущен...')
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
