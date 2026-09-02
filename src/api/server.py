@@ -13,7 +13,7 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from src.database import database
 from src.core import core, abuse_detected
-from src.api import remnawave, tbank
+from src.api import platega, remnawave
 from src.api import recurring as recurring_billing
 from src.api import account_link
 from src.api import email_auth as email_auth_routes
@@ -724,109 +724,115 @@ def get_user_info():
 @app.route('/api/payment/create', methods=['POST'])
 @require_user
 def create_payment(_user=None):
-    import uuid as uuid_lib
+    """Создать СБП-подписку через Platega.
+
+    Принимает:
+      tariff: 'monthly' | 'yearly'  (или days=30/365 + amount)
+      plan_type: 'vpn_regular' | 'vpn_family'
+
+    Возвращает redirect — URL на платёжную форму Platega для привязки СБП.
+    После привязки Platega сама списывает amount каждый период и шлёт callback.
+    """
     data = request.json or {}
     user_id = _user['id']
-    amount = data.get('amount')
-    method = data.get('method') or 'tbank'
-    if amount is None:
-        return (jsonify({'error': 'Missing required fields'}), 400)
-    try:
-        amount = float(amount)
-    except (TypeError, ValueError):
-        return (jsonify({'error': 'Invalid amount'}), 400)
-    if amount <= 0:
-        return (jsonify({'error': 'Invalid amount'}), 400)
-
     user = _user
 
-    if not tbank.tbank_api.is_configured:
-        return (jsonify({'error': 'Т‑Банк эквайринг не настроен'}), 503)
+    if not platega.platega_api.is_configured:
+        return (jsonify({'error': 'Платёжный провайдер не настроен'}), 503)
 
-    days = int(data.get('days') or 0)
-    is_trial = bool(data.get('is_trial'))
-    tariff_category = data.get('tariff_category') or 'regular'
-    plan_type = data.get('plan_type') or data.get('type') or (
-        'vpn_family' if tariff_category == 'family' else 'vpn_regular'
-    )
-    devices_limit = int(data.get('devices_limit') or (5 if tariff_category == 'family' else 2))
+    tariff = str(data.get('tariff') or 'monthly').lower()
+    plan_type = data.get('plan_type') or data.get('type') or 'vpn_regular'
+
+    # Тарифы: только месяц и год
+    if tariff == 'yearly':
+        interval = platega.INTERVAL_YEAR
+        interval_count = 1
+        days = 365
+        amount = float(data.get('amount') or database.get_system_setting('price_yearly') or 2990)
+        description = '1FEDERAL VPN — подписка на год'
+    else:
+        # monthly по умолчанию
+        interval = platega.INTERVAL_MONTH
+        interval_count = 1
+        days = 30
+        amount = float(data.get('amount') or database.get_system_setting('price_monthly') or 399)
+        description = '1FEDERAL VPN — подписка на месяц'
+
+    devices_limit = int(data.get('devices_limit') or 2)
     action_type = data.get('action_type') or 'wizard'
-    vpn_key_id = data.get('key_id') or data.get('vpn_key_id')
 
-    if is_trial:
-        days = 7
-        amount = 10.0
-        plan_type = 'vpn_regular'
-        tariff_category = 'regular'
-        devices_limit = 2
-        if user.get('trial_used', 0) == 1:
-            return (jsonify({'error': 'Пробный период уже использован'}), 400)
+    miniapp_url = (os.getenv('MINIAPP_URL') or '').rstrip('/')
+    return_url = f'{miniapp_url}/?paid=1' if miniapp_url else None
+    failed_url = f'{miniapp_url}/?paid=0' if miniapp_url else None
 
-    if days <= 0 and not is_trial:
-        return (jsonify({'error': 'Укажите срок подписки'}), 400)
-
+    # Сохраняем intent чтобы при callback знать параметры подписки
+    import uuid as uuid_lib
     invoice_id = f'inv_{uuid_lib.uuid4().hex[:20]}'
-    description = (
-        '1FEDERAL VPN — пробный период 7 дней за 10₽'
-        if is_trial
-        else f'1FEDERAL VPN — подписка на {days} дн.'
-    )
-
     ok = database.create_payment_intent(
         invoice_id=invoice_id,
         user_id=int(user_id),
         amount=amount,
         days=days,
         plan_type=plan_type,
-        tariff_category=tariff_category,
+        tariff_category='regular',
         devices_limit=devices_limit,
-        is_trial=is_trial,
+        is_trial=0,
         action_type=action_type,
-        vpn_key_id=int(vpn_key_id) if vpn_key_id else None,
+        vpn_key_id=None,
     )
     if not ok:
         return (jsonify({'error': 'Не удалось создать платёж'}), 500)
 
-    miniapp_url = (os.getenv('MINIAPP_URL') or '').rstrip('/')
-    success_url = f'{miniapp_url}/?paid=1' if miniapp_url else None
-    fail_url = f'{miniapp_url}/?paid=0' if miniapp_url else None
-    webhook_base = (os.getenv('WEBHOOK_URL') or miniapp_url or '').rstrip('/')
-    notification_url = f'{webhook_base}/tbank' if webhook_base else None
-
-    order = tbank.tbank_api.init_payment(
+    result = platega.platega_api.create_subscription(
         amount=amount,
-        order_id=invoice_id[:36],
+        interval=interval,
+        interval_count=interval_count,
         description=description,
-        customer_key=str(user_id),
-        success_url=success_url,
-        fail_url=fail_url,
-        notification_url=notification_url,
-        email=user.get('email'),
-        recurrent=True,
-        data={
-            'user_id': int(user_id),
-            'invoice_id': invoice_id,
-            'is_trial': int(bool(is_trial)),
-            'days': days,
-        },
+        return_url=return_url,
+        failed_url=failed_url,
+        payload=invoice_id,  # передаём invoice_id чтобы связать с intent в callback
     )
-    if not order.get('ok'):
+
+    if not result.get('ok'):
         return (jsonify({
-            'error': order.get('error') or 'T-Bank Init failed',
-            'provider': 'tbank',
-            'details': order.get('response'),
+            'error': result.get('error') or 'Ошибка создания подписки',
+            'provider': 'platega',
         }), 400)
 
+    subscription_id = result['subscription_id']
+
+    # Сохраняем подписку в БД (статус PENDING — станет ACTIVE после callback SUBSCRIPTION_ACTIVATED)
+    database.create_recurring_subscription(
+        user_id=int(user_id),
+        subscription_id=subscription_id,
+        amount=amount,
+        duration_days=days,
+        plan_type=plan_type,
+        tariff_category='regular',
+        devices_limit=devices_limit,
+        action_type=action_type,
+        vpn_key_id=None,
+        card_token=None,
+        saved_method_id=None,
+        next_charge_at=None,
+        last_charge_at=None,
+        converts_from_trial=0,
+        status='PENDING',
+    )
+
+    logger.info(
+        'Platega subscription created user=%s sub=%s tariff=%s amount=%s',
+        user_id, subscription_id, tariff, amount,
+    )
+
     return jsonify({
-        'payment_id': invoice_id,
+        'subscription_id': subscription_id,
         'invoice_id': invoice_id,
-        'order_id': order.get('payment_id'),
-        'payment_url': order.get('payment_url'),
+        'redirect': result['redirect'],   # сюда отправляем пользователя
         'status': 'pending',
         'amount': amount,
-        'recurring': True,
-        'provider': 'tbank',
-        'method': method,
+        'tariff': tariff,
+        'provider': 'platega',
     })
 
 
@@ -834,9 +840,9 @@ def create_payment(_user=None):
 
 def payment_config():
     return jsonify({
-        'provider': 'tbank',
-        'configured': tbank.tbank_api.is_configured,
-        'terminal_key': tbank.tbank_api.terminal_key if tbank.tbank_api.is_configured else '',
+        'provider': 'platega',
+        'configured': platega.platega_api.is_configured,
+        'merchant_id': platega.platega_api.merchant_id if platega.platega_api.is_configured else '',
     })
 
 
@@ -858,6 +864,11 @@ def cancel_recurring_payment(subscription_id: str, _user=None):
     local = database.get_recurring_subscription(subscription_id)
     if not local or int(local['user_id']) != int(user_id):
         return (jsonify({'error': 'Subscription not found'}), 404)
+    # Отменяем в Platega (идемпотентна)
+    try:
+        platega.platega_api.cancel_subscription(subscription_id)
+    except Exception as exc:
+        logger.warning('Platega cancel sub %s: %s', subscription_id, exc)
     database.update_recurring_subscription(subscription_id, status='CANCELLED', next_charge_at=None)
     if user.get('telegram_id'):
         core.send_notification_to_user(
@@ -1196,10 +1207,8 @@ def create_subscription(_user=None):
             if user.get('trial_used', 0) == 1:
                 return (jsonify({'error': 'Пробный период уже использован'}), 400)
             days = int(data.get('days', 7) or 7)
-            # Платный пробный период 7 дней за 10₽ (карта уже привязана)
-            price = float(data.get('price', 10) or 10)
-            if price <= 0:
-                price = 10.0
+            # Триал бесплатный — активируем VPN без списания
+            price = 0.0
             devices_limit = int(data.get('devices_limit', 2) or 2)
             plan_type = 'vpn_regular'
             tariff_category = 'regular'
@@ -1664,22 +1673,15 @@ def refund_transaction(transaction_id: int):
         payment_provider = (transaction['payment_provider'] or '').strip()
         refund_result = None
 
-        # Real money back via T-Bank when we have PaymentId
-        provider_l = payment_provider.lower()
-        is_tbank = provider_l in ('tbank', 'tinkoff', 'тбанк', '') or 'tbank' in provider_l or 'tinkoff' in provider_l
-        is_legacy_cp = 'cloud' in provider_l
-        if payment_id and is_tbank and not is_legacy_cp:
-            refund_result = tbank.tbank_api.cancel_payment(payment_id=payment_id, amount=amount)
+        # Возврат через Platega API
+        if payment_id:
+            refund_result = platega.platega_api.cancel_transaction(payment_id)
             if not refund_result.get('ok'):
                 return (jsonify({
                     'success': False,
-                    'error': refund_result.get('reason') or refund_result.get('error') or 'Т‑Банк отказал в возврате',
+                    'error': refund_result.get('error') or 'Platega отказала в возврате',
+                    'manual_required': refund_result.get('manual_required', False),
                 }), 502)
-        elif payment_id and is_legacy_cp:
-            return (jsonify({
-                'success': False,
-                'error': 'Эта оплата была через CloudPayments — возврат через старый провайдер недоступен',
-            }), 400)
 
         user = database.get_user_by_id(user_id)
         # Нет системы баланса — при возврате просто помечаем транзакцию
@@ -3573,20 +3575,16 @@ def get_payment_settings():
             if provider not in settings:
                 settings[provider] = {}
             settings[provider][row['setting_key']] = row['setting_value']
-        providers = ['tbank']
+        providers = ['platega']
         for p in providers:
             if p not in settings:
                 settings[p] = {'enabled': '0'}
-        # Expose current env (without password) for UI
-        settings.setdefault('tbank', {})
-        settings['tbank']['terminal_key'] = settings['tbank'].get('terminal_key') or (os.getenv('TBANK_TERMINAL_KEY') or '')
-        settings['tbank']['api_url'] = settings['tbank'].get('api_url') or (os.getenv('TBANK_API_URL') or 'https://securepay.tinkoff.ru')
-        settings['tbank']['configured'] = '1' if tbank.tbank_api.is_configured else '0'
-        settings['tbank']['has_password'] = '1' if bool(os.getenv('TBANK_PASSWORD')) else '0'
-        settings['tbank']['taxation'] = settings['tbank'].get('taxation') or (os.getenv('TBANK_TAXATION') or '')
-        settings['tbank']['vat'] = settings['tbank'].get('vat') or (os.getenv('TBANK_VAT') or '')
+        settings.setdefault('platega', {})
+        settings['platega']['merchant_id'] = settings['platega'].get('merchant_id') or (os.getenv('PLATEGA_MERCHANT_ID') or '')
+        settings['platega']['configured'] = '1' if platega.platega_api.is_configured else '0'
+        settings['platega']['has_secret'] = '1' if bool(os.getenv('PLATEGA_SECRET')) else '0'
         webhook_base = (os.getenv('WEBHOOK_URL') or os.getenv('MINIAPP_URL') or '').rstrip('/')
-        settings['tbank']['notification_url_hint'] = f'{webhook_base}/tbank' if webhook_base else ''
+        settings['platega']['webhook_url_hint'] = f'{webhook_base}/platega' if webhook_base else ''
         return jsonify(settings)
     finally:
         conn.close()
@@ -3603,32 +3601,23 @@ def update_payment_settings(provider: str):
         for key, value in data.items():
             cursor.execute('\n                INSERT OR REPLACE INTO payment_provider_settings (provider, setting_key, setting_value, updated_at)\n                VALUES (?, ?, ?, CURRENT_TIMESTAMP)\n            ', (provider, key, str(value)))
         conn.commit()
-        if provider == 'tbank':
+        if provider == 'platega':
             env_updates = {}
-            if 'terminal_key' in data:
-                os.environ['TBANK_TERMINAL_KEY'] = str(data['terminal_key'])
-                env_updates['TBANK_TERMINAL_KEY'] = str(data['terminal_key'])
-            if 'password' in data or 'api_password' in data or 'secret_key' in data:
-                secret = str(data.get('password') or data.get('api_password') or data.get('secret_key') or '')
+            if 'merchant_id' in data:
+                os.environ['PLATEGA_MERCHANT_ID'] = str(data['merchant_id'])
+                env_updates['PLATEGA_MERCHANT_ID'] = str(data['merchant_id'])
+            if 'secret' in data or 'api_secret' in data:
+                secret = str(data.get('secret') or data.get('api_secret') or '')
                 if secret:
-                    os.environ['TBANK_PASSWORD'] = secret
-                    env_updates['TBANK_PASSWORD'] = secret
+                    os.environ['PLATEGA_SECRET'] = secret
+                    env_updates['PLATEGA_SECRET'] = secret
             if 'api_url' in data:
-                os.environ['TBANK_API_URL'] = str(data['api_url'])
-                env_updates['TBANK_API_URL'] = str(data['api_url'])
-            if 'notification_url' in data:
-                os.environ['TBANK_NOTIFICATION_URL'] = str(data['notification_url'])
-                env_updates['TBANK_NOTIFICATION_URL'] = str(data['notification_url'])
-            if 'taxation' in data:
-                os.environ['TBANK_TAXATION'] = str(data['taxation'])
-                env_updates['TBANK_TAXATION'] = str(data['taxation'])
-            if 'vat' in data:
-                os.environ['TBANK_VAT'] = str(data['vat'])
-                env_updates['TBANK_VAT'] = str(data['vat'])
+                os.environ['PLATEGA_API_URL'] = str(data['api_url'])
+                env_updates['PLATEGA_API_URL'] = str(data['api_url'])
             if env_updates:
                 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
                 _save_env_map(env_path, env_updates)
-            tbank.tbank_api.reload_from_env()
+            platega.platega_api.reload_from_env()
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f'Error updating payment settings for {provider}: {e}')

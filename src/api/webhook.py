@@ -1,4 +1,4 @@
-"""T-Bank webhook Flask app (dedicated container on port 5000)."""
+"""Platega webhook Flask app (dedicated container on port 5000)."""
 
 from __future__ import annotations
 
@@ -7,30 +7,22 @@ import os
 
 from flask import Flask, jsonify, request
 
-from src.api import tbank
+from src.api import platega
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-@app.route('/tbank', methods=['GET', 'POST'])
-@app.route('/tbank/notification', methods=['GET', 'POST'])
-def tbank_webhook():
-    return tbank.process_tbank_request(request)
-
-
-# Backward-compatible aliases (old nginx configs / bookmarks)
-@app.route('/cloudpayments', methods=['GET', 'POST'])
-@app.route('/cloudpayments/<event>', methods=['GET', 'POST'])
-def legacy_cloudpayments_alias(event: str = None):
-    return tbank.process_tbank_request(request)
+@app.route('/platega', methods=['GET', 'POST'])
+def platega_webhook():
+    return platega.process_platega_request(request)
 
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         'status': 'ok',
-        'tbank_configured': tbank.tbank_api.is_configured,
+        'platega_configured': platega.platega_api.is_configured,
     })
 
 
