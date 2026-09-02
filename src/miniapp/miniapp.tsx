@@ -1613,7 +1613,6 @@ export default function App() {
       const body: Record<string, unknown> = {
         user_id: currentUserId,
         amount,
-        method: 'tbank',
         days,
         recurring: true,
         is_trial: isTrial,
@@ -1639,7 +1638,7 @@ export default function App() {
       }
 
       setPaymentUrl(payUrl);
-      // Открываем оплату Т‑Банка во внешнем браузере (не в миниаппе)
+      // Открываем оплату во внешнем браузере
       try {
         if (window.Telegram?.WebApp?.openLink) {
           window.Telegram.WebApp.openLink(payUrl);
@@ -2143,15 +2142,36 @@ export default function App() {
       return;
     }
 
-    const price = wizardPlan.isTrial
-      ? Math.max(Number(wizardPlan.price) || 1, 1)
-      : priceAfterPromoDiscount(wizardPlan.price);
-    const tariffLabel = wizardPlan.tariffCategory === 'family' ? 'Семейный' : 'Обычный';
-    const name = wizardPlan.isTrial
-      ? 'Пробная подписка 7 дней (бесплатно)'
-      : `${tariffLabel} (${wizardPlan.duration})`;
+    // Триал — бесплатная активация без платежа
+    if (wizardPlan.isTrial) {
+      try {
+        const res = await miniApiFetch('/subscription/create', {
+          method: 'POST',
+          body: JSON.stringify({
+            user_id: currentUserId,
+            ...buildPlanPayload(wizardPlan, 0),
+            is_trial: true,
+          }),
+        });
+        if (res && res.success) {
+          setIsTrialUsed(true);
+          await refreshAll();
+          setWizardStep(3);
+        } else {
+          alert(res?.error || 'Не удалось активировать пробный период');
+        }
+      } catch (e) {
+        console.error(e);
+        alert('Ошибка при активации пробного периода');
+      }
+      return;
+    }
 
-    if (wizardPlan.isTrial || price > 0) {
+    const price = priceAfterPromoDiscount(wizardPlan.price);
+    const tariffLabel = wizardPlan.tariffCategory === 'family' ? 'Семейный' : 'Обычный';
+    const name = `${tariffLabel} (${wizardPlan.duration})`;
+
+    if (price > 0) {
       startCheckout(price, {
         type: 'wizard',
         payload: { wizardType: 'vpn', wizardPlan, price, name },
